@@ -1,0 +1,7 @@
+sim_data/
+sim_data_bak/
+data/
+swanlog/
+experiments/
+__pycache__/
+PrimitiveAnything/

@@ -1,0 +1,384 @@
+# 3D物体检测统一配置文件 - 泛化性优化版本
+# 包含所有训练、模型、数据、损失参数，避免重复
+version: '2.1'
+
+# =============================================================================
+# 全局设置 - 所有其他部分共享的基础参数
+# =============================================================================
+global:
+  max_seq_len: 12        # 最大序列长度（同时用于模型和数据）
+  pad_id: -1.0           # 填充值（所有模块统一）
+  image_size: [640, 640] # 图像尺寸（输入和数据处理）
+  device: "cuda"         # 训练设备
+  seed: 42               # 随机种子
+  
+  # 训练运行参数
+  logging:
+    log_interval: -1           # -1表示每个epoch只打印一次汇总日志
+    save_interval: 10          # 检查点保存间隔
+    validation_samples: [0, 1, 2, 3, 4]  # 验证样本ID
+  
+  # 可视化参数
+  visualization:
+    distance_threshold: 10.0   # 可视化距离阈值
+    coordinate_threshold: 50   # 坐标过滤阈值
+    box_color: [0, 255, 0]    # 框颜色 (RGB)
+
+# =============================================================================
+# 训练配置 - 训练流程和策略（泛化性优化）
+# =============================================================================
+training:
+  # 训练阶段配置 - 减少过拟合风险
+  phases:
+    teacher_forcing:
+      epochs: 30              # 减少从20->15
+      teacher_forcing_ratio: 1.0
+      scheduled_sampling: false
+      sampling_strategy: "none"
+      description: "完全Teacher Forcing阶段"
+    
+    scheduled_sampling:
+      epochs: 40              # 减少从30->20
+      teacher_forcing_ratio: 1.0  # 从1.0衰减到0
+      scheduled_sampling: true
+      sampling_strategy: "inverse_sigmoid"
+      description: "Scheduled Sampling过渡阶段"
+    
+    pure_generation:
+      epochs: 50             # 大幅减少从250->100，防止过拟合
+      teacher_forcing_ratio: 0.0
+      scheduled_sampling: false
+      sampling_strategy: "none"
+      description: "纯生成阶段"
+  
+  # 优化器配置 - 增强正则化
+  optimizer:
+    type: "AdamW"
+    lr: 0.0001
+    betas: [0.9, 0.999]
+    eps: 0.00000001
+    weight_decay: 0.05        # 增加权重衰减从0.01->0.05
+  
+  # 学习率调度 - 更精细的调度策略
+  scheduler:
+    type: "CosineAnnealingWarmRestarts"  # 使用带重启的余弦退火
+    T_0: 50                  # 第一次重启的周期
+    T_mult: 2                 # 重启后周期倍增
+    eta_min: 0.000001         # 最小学习率
+  
+  # 训练优化 - 增强泛化性
+  optimizations:
+    early_stopping:
+      enabled: true
+      patience: 15            # 增加耐心从10->15
+      min_delta: 0.001
+      eos_threshold: 0.5
+      adaptive_sequence_length: true
+    gradient_clipping:
+      enabled: true
+      max_norm: 0.1           # 减少梯度裁剪从1.0->0.5
+    mixed_precision:
+      enabled: true
+      loss_scale: "dynamic"
+    torch_compile:
+      enabled: false
+      mode: "default"
+    cudnn_optimizations:
+      benchmark: true
+      deterministic: false
+    incremental_inference:
+      enabled: true
+      temperature: 0.3        # 降低温度从0.5->0.3，减少随机性
+      memory_efficient: true
+    best_model_testing:
+      enabled: true        # 在获得最佳模型时在test集上进行推理
+      save_results: true   # 保存test结果到SwanLab
+
+# =============================================================================
+# 模型配置 - 网络架构（增强正则化）
+# =============================================================================
+model:
+  name: "PrimitiveTransformer3DComplex"
+  version: "2.0"
+  
+  # 输入配置
+  input:
+    channels: 6  # RGBXYZ
+  
+  # 图像编码器 - 增强正则化
+  image_encoder:
+    backbone: "resnet50"
+    pretrained: true
+    use_fpn: true
+    fpn_output_channels: 128
+    output_dim: 256
+    
+    # FPN详细配置
+    fpn:
+      attention_layers: [2, 3]
+      attention_heads: 8
+      smooth_conv_kernel: 3
+      smooth_conv_padding: 1
+    
+    # ResNet Conv1配置
+    conv1:
+      out_channels: 64
+      kernel_size: 7
+      stride: 2
+      padding: 3
+      bias: false
+  
+  # Transformer架构 - 增强正则化（实际生效的参数）
+  transformer:
+    dim: 512
+    depth: 6
+    heads: 8
+    dim_head: 64
+    attn_dropout: 0.1         # ✅ 实际生效：注意力dropout
+    ff_dropout: 0.1           # ✅ 实际生效：前馈dropout
+    # use_rotary_emb: true
+    # rotary_emb_dim: 32
+  
+  # 离散化配置
+  discretization:
+    num_discrete_x: 128
+    num_discrete_y: 128
+    num_discrete_z: 128
+    num_discrete_w: 64
+    num_discrete_h: 64
+    num_discrete_l: 64
+  
+  # 嵌入维度
+  embeddings:
+    dim_x_embed: 64
+    dim_y_embed: 64
+    dim_z_embed: 64
+    dim_w_embed: 64
+    dim_h_embed: 64
+    dim_l_embed: 64
+  
+  # 条件化配置
+  conditioning:
+    condition_on_image: true
+    image_film_cond: true
+    # use_self_cond: false
+    # self_cond_prob: 0.5
+  
+  # 高级配置 - 增强正则化
+  advanced:
+    use_gateloop: true
+    gateloop_use_heinsen: false
+    
+    # GateLoop详细配置
+    gateloop:
+      depth: 2
+    
+    # 位置编码配置
+    positional_encoding:
+      # 2D位置编码 (用于图像特征)
+      pos_2d:
+        base: 10000
+        dim_divisor: 4
+      
+      # 1D位置编码 (用于序列) 
+      pos_1d:
+        max_seq_len: 1000
+        learnable: false
+
+# =============================================================================
+# 数据配置 - 数据加载和增强（大幅增强）
+# =============================================================================
+data:
+  # 数据集设置
+  dataset:
+    data_root: "sim_data_bak"
+    
+  # 3D坐标和尺寸范围
+  continuous_ranges:
+    x: [0.5, 2.5]
+    y: [-2.0, 2.0] 
+    z: [-1.5, 1.5]
+    w: [0.3, 0.7]
+    h: [0.3, 0.7]
+    l: [0.3, 0.7]
+  
+  # DataLoader设置
+  dataloader:
+    batch_size: 4
+    num_workers: 4
+    pin_memory: true
+    prefetch_factor: 2
+    persistent_workers: true
+    shuffle: true
+    drop_last: true
+  
+  # 数据增强 - 大幅增强泛化性
+  augmentation:
+    enabled: true
+    intensity: 1.2            # 增加增强强度从1.0->1.2
+    
+    # RGB图像增强 - 增强
+    rgb_enhancement:
+      brightness:
+        enabled: true
+        probability: 0.8      # 增加概率从0.7->0.8
+        factor_range: [0.7, 1.3]  # 扩大范围从[0.8,1.2]->[0.7,1.3]
+      contrast:
+        enabled: true
+        probability: 0.8      # 增加概率从0.7->0.8
+        factor_range: [0.7, 1.3]  # 扩大范围
+      saturation:
+        enabled: true
+        probability: 0.6      # 增加概率从0.5->0.6
+        factor_range: [0.7, 1.3]  # 扩大范围
+      hue:
+        enabled: true
+        probability: 0.4      # 增加概率从0.3->0.4
+        shift_range: [-15, 15]    # 扩大范围从[-10,10]->[-15,15]
+    
+    # RGB噪声 - 增强
+    rgb_noise:
+      gaussian:
+        enabled: true
+        probability: 0.7      # 增加概率从0.6->0.7
+        std_range: [3, 10]    # 扩大范围从[2,8]->[3,10]
+      salt_pepper:
+        enabled: true
+        probability: 0.5      # 增加概率从0.4->0.5
+        ratio_range: [0.001, 0.015]  # 扩大范围
+      speckle:
+        enabled: true
+        probability: 0.4      # 增加概率从0.3->0.4
+        std_range: [0.05, 0.2]  # 扩大范围
+    
+    # 点云增强 - 增强
+    point_cloud:
+      enabled: true
+      gaussian_noise:
+        enabled: true
+        probability: 0.8      # 增加概率从0.7->0.8
+        std_ranges:
+          x: [0.002, 0.008]   # 扩大范围
+          y: [0.002, 0.008]   # 扩大范围
+          z: [0.002, 0.008]   # 扩大范围
+      dropout:
+        enabled: true
+        probability: 0.6      # 增加概率从0.5->0.6
+        ratio_range: [0.0002, 0.002]  # 扩大范围
+      quantization:
+        enabled: false         # 启用量化增强
+        probability: 0.5
+        step_range: [0.005, 0.025]   # 扩大范围
+      coordinate_bias:
+        enabled: false         # 启用坐标偏置
+        probability: 0.4
+        bias_ranges:
+          x: [-0.03, 0.03]    # 扩大范围
+          y: [-0.03, 0.03]    # 扩大范围
+          z: [-0.015, 0.015]  # 扩大范围
+    
+    # 3D box增强 - 启用并增强
+    box_augmentation:
+      enabled: false           # 启用3D box增强
+      probability: 0.3        # 增加概率从0.2->0.3
+      position_noise:
+        enabled: false         # 启用位置噪声
+        probability: 0.5
+        noise_ranges:
+          x: [-0.01, 0.01]    # 扩大范围
+          y: [-0.01, 0.01]    # 扩大范围
+          z: [-0.01, 0.01]  # 扩大范围
+      size_noise:
+        enabled: false         # 启用尺寸噪声
+        probability: 0.3      # 增加概率从0.6->0.7
+        noise_ranges:
+          w: [-0.005, 0.005]  # 扩大范围
+          h: [-0.005, 0.005]  # 扩大范围
+          l: [-0.005, 0.005]  # 扩大范围
+
+    global_translation:
+      enabled: false
+      probability: 0.9            # 全局平移概率
+      translation_ranges:
+        x: [-0.1, 0.3]           # X方向平移范围
+        y: [-0.1, 0.1]           # Y方向平移范围
+        z: [-0.1, 0.5]         # Z方向平移范围（通常较小）
+
+# =============================================================================
+# 损失函数配置 - 优化权重平衡
+# =============================================================================
+loss:
+  name: "AdaptivePrimitiveTransformer3DLoss"
+  version: "2.0"
+  
+  # 数据处理
+  data_processing:
+    ignore_index: -100
+    label_smoothing: 0.15     # 增加标签平滑从0.1->0.15
+    pad_id: -1.0
+  
+  # 算法参数
+  algorithm:
+    # 距离感知分类
+    distance_aware:
+      enabled: true
+      alpha: 1.5              # 降低alpha从2.0->1.5，减少过拟合
+    
+    # Focal Loss - 启用
+    focal:
+      gamma: 2.0
+  
+  # 基础权重 - 重新平衡
+  base_weights:
+    classification: 1.2       # 增加分类权重从1.0->1.2
+    delta: 1.8               # 降低delta权重从2.0->1.8
+    eos: 1.5                # 降低eos权重从2.0->1.5
+    iou: 1.2                # 增加iou权重从1.0->1.2
+  
+  # 自适应权重 - 优化范围
+  adaptive_weights:
+    adaptive_classification: true
+    adaptive_delta: true
+    interpolation: "linear"
+    
+    thresholds:
+      low: 0.25              # 降低阈值从0.3->0.25
+      high: 0.75             # 提高阈值从0.7->0.75
+    
+    # 分类权重范围 - 缩小范围
+    classification_range:
+      min: 0.8               # 提高最小值从0.5->0.8
+      max: 1.8               # 降低最大值从2.0->1.8
+    
+    # Delta权重范围 - 缩小范围
+    delta_range:
+      min: 0.8               # 提高最小值从0.5->0.8
+      max: 1.8               # 降低最大值从2.0->1.8
+
+# =============================================================================
+# 实验配置 - 日志和保存
+# =============================================================================
+experiment:
+  name: "primitive_3d_corner_aug"
+  description: "泛化性优化的3D物体检测实验"
+  
+  # 检查点配置
+  checkpoints:
+    save_dir: "experiments"
+    save_latest: true
+    save_best_val: true
+    save_best_generation: true
+    save_interval: null
+  
+  # 验证配置
+  validation:
+    interval: 1
+    samples: [0, 1, 2, 3, 4]
+    
+  # 日志配置
+  logging:
+    use_swanlab: true
+    log_interval: 10
+    save_model_graph: false
+    log_gradients: false
+    log_weights: false 
