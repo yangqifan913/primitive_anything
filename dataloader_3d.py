@@ -61,6 +61,9 @@ class Box3DDataset(Dataset):
         self.image_size = image_size if image_size is not None else (640, 640)
         self.pad_id = pad_id if pad_id is not None else -1
         
+        # 点云降采样比例
+        self.point_cloud_sample_ratio = kwargs.get('point_cloud_sample_ratio', 0.1)
+        
         # 🔧 修复：数据增强设置 - 优先使用传入的augmentation_config
         if augmentation_config is not None:
             self.aug_config = augmentation_config
@@ -104,6 +107,7 @@ class Box3DDataset(Dataset):
         print(f"  图像尺寸: {self.image_size}")
         print(f"  最大box数: {self.max_boxes}")
         print(f"  数据增强: {self.augment} (强度: {self.augment_intensity})")
+        print(f"  点云采样比例: {self.point_cloud_sample_ratio:.1%}")
     
     def _scan_data(self) -> List[Dict]:
         """扫描数据目录，返回样本列表"""
@@ -156,7 +160,7 @@ class Box3DDataset(Dataset):
         return len(self.samples)
     
     def _load_rgbxyz_image(self, npz_file: str) -> np.ndarray:
-        """加载RGBXYZ图像数据"""
+        """加载RGBXYZ图像数据（原始数据，不进行降采样和切割）"""
         try:
             data = np.load(npz_file)
             rgbxyz = data['rgbxyz']  # Shape: (H, W, 6) - [R, G, B, X, Y, Z]
@@ -166,6 +170,137 @@ class Box3DDataset(Dataset):
             print(f"加载图像失败 {npz_file}: {e}")
             # 返回空图像
             return np.zeros((*self.image_size, 6), dtype=np.float32)
+    
+    def _downsample_point_cloud(self, rgbxyz: np.ndarray, sample_ratio: float = 0.1) -> np.ndarray:
+        """
+        对RGBXYZ点云数据进行随机降采样
+        
+        Args:
+            rgbxyz: Shape (H, W, 6) - RGBXYZ数据
+            sample_ratio: 采样比例，默认0.1（10%）
+            
+        Returns:
+            downsampled_rgbxyz: Shape (H, W, 6) - 降采样后的数据
+        """
+        H, W, C = rgbxyz.shape
+        
+        # 计算需要采样的点数
+        total_points = H * W
+        num_samples = int(total_points * sample_ratio)
+        
+        if num_samples <= 0:
+            num_samples = 1
+        
+        # 生成随机索引
+        np.random.seed()  # 使用当前时间作为随机种子
+        random_indices = np.random.choice(total_points, size=num_samples, replace=False)
+        
+        # 将2D索引转换为1D索引
+        rgbxyz_flat = rgbxyz.reshape(total_points, C)  # (H*W, 6)
+        
+        # 随机采样
+        sampled_points = rgbxyz_flat[random_indices]  # (num_samples, 6)
+        
+        # 创建新的RGBXYZ图像，未采样的点用零填充
+        downsampled_rgbxyz = np.zeros_like(rgbxyz)
+        downsampled_flat = downsampled_rgbxyz.reshape(total_points, C)
+        
+        # 将采样的点放回原位置
+        downsampled_flat[random_indices] = sampled_points
+        
+        # 重新reshape为原始形状
+        downsampled_rgbxyz = downsampled_flat.reshape(H, W, C)
+        
+        return downsampled_rgbxyz
+    
+    def _crop_point_cloud(self, rgbxyz: np.ndarray) -> np.ndarray:
+        """
+        根据坐标范围裁剪点云数据
+        
+        Args:
+            rgbxyz: Shape (H, W, 6) - RGBXYZ数据
+            
+        Returns:
+            cropped_rgbxyz: Shape (H, W, 6) - 裁剪后的数据
+        """
+        H, W, C = rgbxyz.shape
+        
+        # 分离RGB和XYZ
+        rgb = rgbxyz[..., 0:3]  # RGB
+        xyz = rgbxyz[..., 3:6]  # XYZ
+        
+        # 创建坐标范围掩码
+        x_mask = (xyz[..., 0] >= self.continuous_range_x[0]) & (xyz[..., 0] <= self.continuous_range_x[1])
+        y_mask = (xyz[..., 1] >= self.continuous_range_y[0]) & (xyz[..., 1] <= self.continuous_range_y[1])
+        z_mask = (xyz[..., 2] >= self.continuous_range_z[0]) & (xyz[..., 2] <= self.continuous_range_z[1])
+        
+        # 组合掩码：所有坐标都在范围内
+        valid_mask = x_mask & y_mask & z_mask
+        
+        # 创建裁剪后的数据
+        cropped_rgbxyz = np.zeros_like(rgbxyz)
+        
+        # 将有效点的数据复制到裁剪后的数据中
+        cropped_rgbxyz[valid_mask] = rgbxyz[valid_mask]
+        
+        return cropped_rgbxyz
+    
+    def _convert_to_point_cloud(self, rgbxyz: np.ndarray) -> torch.Tensor:
+        """
+        将RGBXYZ图像转换为点云格式，只保留有效点
+        
+        Args:
+            rgbxyz: Shape (H, W, 6) - RGBXYZ数据
+            
+        Returns:
+            point_cloud: Shape (N, 6) - 变长点云数据，N是有效点的数量
+        """
+        H, W, C = rgbxyz.shape
+        
+        # 找到有效点（非零点）
+        # 检查XYZ坐标是否非零
+        xyz = rgbxyz[..., 3:6]  # XYZ坐标
+        valid_mask = (xyz[..., 0] != 0) | (xyz[..., 1] != 0) | (xyz[..., 2] != 0)
+        
+        # 获取有效点的索引
+        valid_indices = np.where(valid_mask)
+        
+        if len(valid_indices[0]) == 0:
+            # 如果没有有效点，返回一个空点云
+            return torch.zeros((1, 6), dtype=torch.float32)
+        
+        # 提取有效点
+        valid_points = rgbxyz[valid_indices]  # (N, 6)
+        
+        # 转换为torch tensor
+        point_cloud = torch.from_numpy(valid_points).float()
+        
+        return point_cloud
+    
+    def custom_collate_fn(self, batch):
+        """
+        自定义collate函数，处理变长点云数据
+        """
+        # 分离点云数据和其他数据
+        point_clouds = [item['point_cloud'] for item in batch]
+        num_points = [item['num_points'] for item in batch]
+        
+        # 其他数据使用默认的collate
+        other_data = {}
+        for key in batch[0].keys():
+            if key not in ['point_cloud', 'num_points']:
+                # 检查数据类型，只对tensor使用stack
+                if isinstance(batch[0][key], torch.Tensor):
+                    other_data[key] = torch.stack([item[key] for item in batch])
+                else:
+                    # 对于非tensor数据（如字符串），直接收集为列表
+                    other_data[key] = [item[key] for item in batch]
+        
+        # 处理变长点云数据
+        other_data['point_clouds'] = point_clouds  # 保持为列表
+        other_data['num_points'] = torch.tensor(num_points, dtype=torch.long)
+        
+        return other_data
     
     def _load_boxes(self, json_file: str) -> List[Dict]:
         """加载3D box标注"""
@@ -431,14 +566,20 @@ class Box3DDataset(Dataset):
         """获取单个样本"""
         sample = self.samples[idx]
         
-        # 加载RGBXYZ图像
+        # 加载RGBXYZ图像（原始数据）
         rgbxyz = self._load_rgbxyz_image(sample['npz_file'])  # (H, W, 6)
         
         # 加载3D box标注
         boxes = self._load_boxes(sample['json_file'])
         
-        # 数据增强
+        # 数据增强（在降采样和切割之前）
         rgbxyz, boxes = self._augment_data(rgbxyz, boxes)
+        
+        # 点云降采样：随机采样到指定比例
+        rgbxyz_downsampled = self._downsample_point_cloud(rgbxyz, sample_ratio=self.point_cloud_sample_ratio)
+        
+        # 点云裁剪：根据坐标范围裁剪点云
+        rgbxyz_cropped = self._crop_point_cloud(rgbxyz_downsampled)
         
         # 归一化坐标并提取旋转信息
         x, y, z, w, h, l, rotations = self._normalize_coordinates(boxes)
@@ -446,20 +587,21 @@ class Box3DDataset(Dataset):
         # Pad序列到固定长度
         x_padded, y_padded, z_padded, w_padded, h_padded, l_padded, rotations_padded = self._pad_sequences(x, y, z, w, h, l, rotations)
         
-        # 转换图像格式：(H, W, 6) -> (6, H, W)
-        rgbxyz_tensor = torch.from_numpy(rgbxyz).permute(2, 0, 1).float()
+        # 转换为点云格式：(H, W, 6) -> (N, 6) 其中N是有效点的数量
+        rgbxyz_points = self._convert_to_point_cloud(rgbxyz_cropped)
         
         # 归一化RGB通道到[0,1]
-        rgbxyz_tensor[:3] = rgbxyz_tensor[:3] / 255.0
+        rgbxyz_points[:, :3] = rgbxyz_points[:, :3] / 255.0
         
         # 🔧 修复：不归一化XYZ点云通道，保持原始数值
         # 只进行范围裁剪，确保在有效范围内
-        rgbxyz_tensor[3] = torch.clamp(rgbxyz_tensor[3], self.continuous_range_x[0], self.continuous_range_x[1])  # X
-        rgbxyz_tensor[4] = torch.clamp(rgbxyz_tensor[4], self.continuous_range_y[0], self.continuous_range_y[1])  # Y  
-        rgbxyz_tensor[5] = torch.clamp(rgbxyz_tensor[5], self.continuous_range_z[0], self.continuous_range_z[1])  # Z
+        rgbxyz_points[:, 3] = torch.clamp(rgbxyz_points[:, 3], self.continuous_range_x[0], self.continuous_range_x[1])  # X
+        rgbxyz_points[:, 4] = torch.clamp(rgbxyz_points[:, 4], self.continuous_range_y[0], self.continuous_range_y[1])  # Y  
+        rgbxyz_points[:, 5] = torch.clamp(rgbxyz_points[:, 5], self.continuous_range_z[0], self.continuous_range_z[1])  # Z
         
         return {
-            'image': rgbxyz_tensor,  # (6, H, W) - RGBXYZ
+            'point_cloud': rgbxyz_points,  # (N, 6) - 变长点云数据
+            'num_points': rgbxyz_points.shape[0],  # 点云数量
             'x': x_padded,          # (max_boxes,)
             'y': y_padded,          # (max_boxes,)
             'z': z_padded,          # (max_boxes,)
@@ -515,7 +657,8 @@ def create_dataloader(
         pin_memory=pin_memory,
         drop_last=drop_last,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
-        persistent_workers=persistent_workers if num_workers > 0 else False
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        collate_fn=dataset.custom_collate_fn  # 使用自定义collate函数处理变长点云
     )
     
     return dataloader

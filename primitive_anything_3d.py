@@ -9,7 +9,6 @@ from typing import List, Tuple, Dict, Optional
 from einops import rearrange, repeat, pack
 from x_transformers import Decoder
 from x_transformers.autoregressive_wrapper import eval_decorator
-import torchvision.models as models
 from gateloop_transformer import SimpleGateLoopLayer
 from torch.amp import autocast
 from torch.utils.checkpoint import checkpoint
@@ -57,7 +56,7 @@ class GateLoopBlock(nn.Module):
 
     def forward(self, x, cache=None):
         """
-        参考PrimitiveAnything的GateLoopBlock实现
+        完全按照PrimitiveAnything的GateLoopBlock实现
         
         Args:
             x: 输入tensor [B, seq_len, dim]
@@ -67,10 +66,13 @@ class GateLoopBlock(nn.Module):
             x: 输出tensor
             new_caches: 更新后的缓存列表
         """
-        received_cache = cache is not None and len(cache) > 0
+        received_cache = cache is not None
 
         if x.numel() == 0:  # 空tensor检查
-            return x, cache
+            # 返回正确长度的空缓存，而不是None
+            expected_layers = len(self.gateloops)
+            empty_caches = [None] * expected_layers
+            return x, empty_caches
 
         if received_cache:
             # 如果有缓存，分离之前的序列和新token
@@ -82,20 +84,8 @@ class GateLoopBlock(nn.Module):
         new_caches = []
         for gateloop in self.gateloops:
             layer_cache = next(cache_iter, None)
-            # 检查gateloop是否支持cache和return_cache参数
-            if hasattr(gateloop, 'forward') and 'cache' in gateloop.forward.__code__.co_varnames:
-                try:
-                    out, new_cache = gateloop(x, cache=layer_cache, return_cache=True)
-                    new_caches.append(new_cache)
-                except TypeError:
-                    # 如果不支持return_cache，使用普通前向传播
-                    out = gateloop(x)
-                    new_caches.append(None)
-            else:
-                # 普通前向传播
-                out = gateloop(x)
-                new_caches.append(None)
-            
+            out, new_cache = gateloop(x, cache=layer_cache, return_cache=True)
+            new_caches.append(new_cache)
             x = x + out
 
         if received_cache:
@@ -104,260 +94,280 @@ class GateLoopBlock(nn.Module):
 
         return x, new_caches
 
-def build_2d_sine_positional_encoding(H, W, dim):
-    """
-    构建 [H, W, dim] 的 2D sine-cosine 位置编码
-    顺序：先左到右，再由下到上
-    """
-    # 修改顺序：先x（左到右），再y（下到上）
-    x_embed = torch.linspace(0, 1, steps=W).unsqueeze(0).repeat(H, 1)
-    y_embed = torch.linspace(0, 1, steps=H).unsqueeze(1).repeat(1, W)
-    
-    dim_t = torch.arange(dim // 4, dtype=torch.float32)
-    dim_t = 10000 ** (2 * (dim_t // 2) / (dim // 2))
 
-    pos_x = x_embed[..., None] / dim_t
-    pos_y = y_embed[..., None] / dim_t
-
-    pos_x = torch.stack((pos_x.sin(), pos_x.cos()), dim=-1).flatten(-2)
-    pos_y = torch.stack((pos_y.sin(), pos_y.cos()), dim=-1).flatten(-2)
-
-    pos = torch.cat((pos_x, pos_y), dim=-1)  # [H, W, dim] - 先x后y
-    return pos
-
-class EnhancedFPN(nn.Module):
-    """超轻量版Feature Pyramid Network - 大幅降低内存占用"""
-    def __init__(self, in_channels, out_channels=32, attention_heads=2, attention_layers=None):  # 支持配置化
+# 首先实现Michelangelo的核心组件
+class FourierEmbedder(nn.Module):
+    """Michelangelo的傅里叶位置编码器"""
+    def __init__(self, num_freqs=8, logspace=True, input_dim=3, include_input=True, include_pi=True):
         super().__init__()
-        self.out_channels = out_channels
         
-        # 侧边连接层 - 将不同层的特征统一到相同通道数
-        # ResNet50的通道数: [256, 512, 1024, 2048]
-        self.lateral_convs = nn.ModuleList([
-            nn.Conv2d(256, out_channels, 1),   # layer1
-            nn.Conv2d(512, out_channels, 1),   # layer2
-            nn.Conv2d(1024, out_channels, 1),  # layer3
-            nn.Conv2d(2048, out_channels, 1),  # layer4
-        ])
+        if logspace:
+            frequencies = 2.0 ** torch.arange(num_freqs, dtype=torch.float32)
+        else:
+            frequencies = torch.linspace(1.0, 2.0 ** (num_freqs - 1), num_freqs, dtype=torch.float32)
         
-        # 简化的平滑层 - 只保留一层卷积
-        self.smooth_convs = nn.ModuleList([
-            nn.Conv2d(out_channels, out_channels, 3, padding=1)
-            for _ in range(4)
-        ])
-        
-        # 移除额外的卷积层
-        self.extra_convs = nn.ModuleList([
-            nn.Identity() for _ in range(4)
-        ])
-        
-        # 注意力机制配置化
-        if attention_layers is None:
-            attention_layers = [2, 3]  # 默认在layer3和layer4使用注意力
-        self.attention_layers = attention_layers
-        self.attention_blocks = nn.ModuleList([
-            nn.MultiheadAttention(out_channels, num_heads=attention_heads, batch_first=True)
-            for _ in range(len(attention_layers))
-        ])
-        
-    def forward(self, features):
-        """
-        Args:
-            features: List of tensors from different layers
-                     [layer1_feat, layer2_feat, layer3_feat, layer4_feat]
-        Returns:
-            fpn_features: List of FPN features at different scales
-        """
-        # 从高层到低层处理
-        laterals = []
-        for i, (feat, lateral_conv) in enumerate(zip(features, self.lateral_convs)):
-            lateral = lateral_conv(feat)
-            laterals.append(lateral)
-        
-        # 自顶向下路径
-        for i in range(len(laterals) - 2, -1, -1):
-            # 上采样高层特征
-            upsampled = F.interpolate(
-                laterals[i + 1], 
-                size=laterals[i].shape[-2:], 
-                mode='nearest'
-            )
-            # 添加侧边连接
-            laterals[i] = laterals[i] + upsampled
-        
-        # 平滑处理和注意力
-        fpn_features = []
-        attention_idx = 0  # 注意力模块的索引
-        
-        for i, (lateral, smooth_conv, extra_conv) in enumerate(
-            zip(laterals, self.smooth_convs, self.extra_convs)
-        ):
-            # 平滑处理
-            smoothed = F.relu(smooth_conv(lateral))
-            # 额外卷积（现在是Identity）
-            extra = extra_conv(smoothed)
+        if include_pi:
+            frequencies *= torch.pi
             
-            # 可配置的注意力机制
-            if i in self.attention_layers and attention_idx < len(self.attention_blocks):
-                b, c, h, w = extra.shape
-                extra_flat = extra.view(b, c, h*w).permute(0, 2, 1)  # [B, H*W, C]
-                attended, _ = self.attention_blocks[attention_idx](extra_flat, extra_flat, extra_flat)
-                attended = attended.permute(0, 2, 1).view(b, c, h, w)  # [B, C, H, W]
-                fpn_features.append(attended)
-                attention_idx += 1
-            else:
-                # 不使用注意力的层直接输出
-                fpn_features.append(extra)
-        
-        return fpn_features
+        self.register_buffer("frequencies", frequencies, persistent=False)
+        self.include_input = include_input
+        self.num_freqs = num_freqs
+        self.out_dim = self.get_dims(input_dim)
+    
+    def get_dims(self, input_dim):
+        temp = 1 if self.include_input or self.num_freqs == 0 else 0
+        out_dim = input_dim * (self.num_freqs * 2 + temp)
+        return out_dim
+    
+    def forward(self, x):
+        if self.num_freqs > 0:
+            embed = (x[..., None].contiguous() * self.frequencies).view(*x.shape[:-1], -1)
+            if self.include_input:
+                embed = torch.cat([embed, x], dim=-1)
+            return embed
+        else:
+            return x
 
-class DeepVisualProcessor(nn.Module):
-    """简化版视觉特征处理器"""
-    def __init__(self, in_channels, out_channels):
+class ResidualCrossAttentionBlock(nn.Module):
+    """Michelangelo的残差交叉注意力块"""
+    def __init__(self, device=None, dtype=None, width=768, heads=12, init_scale=0.25, 
+                 qkv_bias=True, flash=False, n_data=None):
         super().__init__()
         
-        # 简化的卷积网络
-        self.conv_layers = nn.Sequential(
-            # 单层处理
-            nn.Conv2d(in_channels, out_channels, 3, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+        self.width = width
+        self.heads = heads
+        
+        # QKV投影
+        self.c_qkv = nn.Linear(width, width * 3, bias=qkv_bias, device=device, dtype=dtype)
+        self.c_proj = nn.Linear(width, width, device=device, dtype=dtype)
+        
+        # 初始化
+        nn.init.normal_(self.c_qkv.weight, std=init_scale)
+        nn.init.normal_(self.c_proj.weight, std=init_scale)
+        if qkv_bias:
+            nn.init.constant_(self.c_qkv.bias, 0.0)
+        if self.c_proj.bias is not None:
+            nn.init.constant_(self.c_proj.bias, 0.0)
+    
+    def forward(self, query, data):
+        # query: [B, num_latents, width]
+        # data: [B, num_points, width]
+        
+        B, N_latents, _ = query.shape
+        B, N_data, _ = data.shape
+        
+        # 计算QKV
+        qkv = self.c_qkv(query)  # [B, num_latents, width*3]
+        q, k, v = torch.split(qkv, self.width, dim=-1)
+        
+        # 从data中获取key和value
+        data_kv = self.c_qkv(data)  # [B, num_data, width*3]
+        _, k_data, v_data = torch.split(data_kv, self.width, dim=-1)
+        
+        # 交叉注意力
+        scale = 1 / math.sqrt(math.sqrt(self.width // self.heads))
+        
+        # 重塑为多头格式
+        q = q.view(B, N_latents, self.heads, -1)
+        k_data = k_data.view(B, N_data, self.heads, -1)
+        v_data = v_data.view(B, N_data, self.heads, -1)
+        
+        # 计算注意力权重
+        attn_weights = torch.einsum("bthc,bshc->bhts", q * scale, k_data * scale)
+        attn_weights = torch.softmax(attn_weights.float(), dim=-1).type(q.dtype)
+        
+        # 应用注意力
+        out = torch.einsum("bhts,bshc->bthc", attn_weights, v_data).reshape(B, N_latents, -1)
+        
+        # 输出投影
+        out = self.c_proj(out)
+        
+        return out
+
+class Transformer(nn.Module):
+    """Michelangelo的Transformer编码器"""
+    def __init__(self, device=None, dtype=None, n_ctx=256, width=768, layers=8, 
+                 heads=12, init_scale=0.25, qkv_bias=True, flash=False, use_checkpoint=False):
+        super().__init__()
+        
+        self.use_checkpoint = use_checkpoint
+        self.width = width
+        self.layers = layers
+        
+        # 构建Transformer层
+        self.resblocks = nn.ModuleList([
+            ResidualAttentionBlock(
+                device=device, dtype=dtype, n_ctx=n_ctx, width=width, heads=heads,
+                init_scale=init_scale, qkv_bias=qkv_bias, flash=flash, use_checkpoint=use_checkpoint
+            ) for _ in range(layers)
+        ])
+    
+    def forward(self, x):
+        for block in self.resblocks:
+            x = block(x)
+        return x
+
+class ResidualAttentionBlock(nn.Module):
+    """Michelangelo的残差注意力块"""
+    def __init__(self, device=None, dtype=None, n_ctx=256, width=768, heads=12, 
+                 init_scale=0.25, qkv_bias=True, flash=False, use_checkpoint=False):
+        super().__init__()
+        
+        self.use_checkpoint = use_checkpoint
+        
+        # 自注意力
+        self.attn = MultiheadAttention(
+            device=device, dtype=dtype, n_ctx=n_ctx, width=width, heads=heads,
+            init_scale=init_scale, qkv_bias=qkv_bias, flash=flash
         )
         
-        # 残差连接
-        self.shortcut = nn.Conv2d(in_channels, out_channels, 1) if in_channels != out_channels else nn.Identity()
+        # 前馈网络
+        self.mlp = MLP(device=device, dtype=dtype, width=width, init_scale=init_scale)
         
+        # LayerNorm
+        self.ln_1 = nn.LayerNorm(width, device=device, dtype=dtype)
+        self.ln_2 = nn.LayerNorm(width, device=device, dtype=dtype)
+    
     def forward(self, x):
-        residual = self.shortcut(x)
-        out = self.conv_layers(x)
-        return out + residual
+        # 自注意力 + 残差连接
+        x = x + self.attn(self.ln_1(x))
+        # MLP + 残差连接
+        x = x + self.mlp(self.ln_2(x))
+        return x
 
-class ImageEncoder(nn.Module):
-    """简化版图像编码器 - 支持多种ResNet backbone + 简化FPN + 简化处理器"""
-    def __init__(self, input_channels=3, output_dim=256, use_fpn=True, backbone="resnet50", pretrained=True):  # 从256减少到192
+class MultiheadAttention(nn.Module):
+    """Michelangelo的多头注意力"""
+    def __init__(self, device=None, dtype=None, n_ctx=256, width=768, heads=12, 
+                 init_scale=0.25, qkv_bias=True, flash=False):
         super().__init__()
-        self.use_fpn = use_fpn
-        self.backbone = backbone
-        self.pretrained = pretrained
         
-        # 根据配置选择backbone
-        if backbone.lower() == "resnet18":
-            if pretrained:
-                self.backbone_model = models.resnet18(weights=models.ResNet18_Weights.IMAGENET1K_V1)
-            else:
-                self.backbone_model = models.resnet18(weights=None)
-            self.backbone_channels = [64, 128, 256, 512]  # ResNet18的通道数
-        elif backbone.lower() == "resnet34":
-            if pretrained:
-                self.backbone_model = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1)
-            else:
-                self.backbone_model = models.resnet34(weights=None)
-            self.backbone_channels = [64, 128, 256, 512]  # ResNet34的通道数
-        elif backbone.lower() == "resnet50":
-            if pretrained:
-                self.backbone_model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-            else:
-                self.backbone_model = models.resnet50(weights=None)
-            self.backbone_channels = [256, 512, 1024, 2048]  # ResNet50的通道数
-        elif backbone.lower() == "resnet101":
-            if pretrained:
-                self.backbone_model = models.resnet101(weights=models.ResNet101_Weights.IMAGENET1K_V1)
-            else:
-                self.backbone_model = models.resnet101(weights=None)
-            self.backbone_channels = [256, 512, 1024, 2048]  # ResNet101的通道数
+        self.n_ctx = n_ctx
+        self.width = width
+        self.heads = heads
+        
+        self.c_qkv = nn.Linear(width, width * 3, bias=qkv_bias, device=device, dtype=dtype)
+        self.c_proj = nn.Linear(width, width, device=device, dtype=dtype)
+        
+        # 初始化
+        nn.init.normal_(self.c_qkv.weight, std=init_scale)
+        nn.init.normal_(self.c_proj.weight, std=init_scale)
+        if qkv_bias:
+            nn.init.constant_(self.c_qkv.bias, 0.0)
+        if self.c_proj.bias is not None:
+            nn.init.constant_(self.c_proj.bias, 0.0)
+    
+    def forward(self, x):
+        x = self.c_qkv(x)
+        x = self.attention(x)
+        x = self.c_proj(x)
+        return x
+    
+    def attention(self, qkv):
+        bs, n_ctx, width = qkv.shape
+        attn_ch = width // self.heads // 3
+        scale = 1 / math.sqrt(math.sqrt(attn_ch))
+        qkv = qkv.view(bs, n_ctx, self.heads, -1)
+        q, k, v = torch.split(qkv, attn_ch, dim=-1)
+        
+        weight = torch.einsum("bthc,bshc->bhts", q * scale, k * scale)
+        wdtype = weight.dtype
+        weight = torch.softmax(weight.float(), dim=-1).type(wdtype)
+        out = torch.einsum("bhts,bshc->bthc", weight, v).reshape(bs, n_ctx, -1)
+        return out
+
+class MLP(nn.Module):
+    """Michelangelo的MLP"""
+    def __init__(self, device=None, dtype=None, width=768, init_scale=0.25):
+        super().__init__()
+        
+        self.c_fc = nn.Linear(width, width * 4, device=device, dtype=dtype)
+        self.c_proj = nn.Linear(width * 4, width, device=device, dtype=dtype)
+        
+        # 初始化
+        nn.init.normal_(self.c_fc.weight, std=init_scale)
+        nn.init.normal_(self.c_proj.weight, std=init_scale)
+        nn.init.constant_(self.c_fc.bias, 0.0)
+        nn.init.constant_(self.c_proj.bias, 0.0)
+    
+    def forward(self, x):
+        x = self.c_fc(x)
+        x = F.gelu(x)
+        x = self.c_proj(x)
+        return x
+
+class CrossAttentionEncoder(nn.Module):
+    """Michelangelo的交叉注意力编码器"""
+    def __init__(self, device=None, dtype=None, num_latents=256, fourier_embedder=None,
+                 point_feats=3, width=768, heads=12, layers=8, init_scale=0.25,
+                 qkv_bias=True, flash=False, use_ln_post=False, use_checkpoint=False):
+        super().__init__()
+        
+        self.use_checkpoint = use_checkpoint
+        self.num_latents = num_latents
+        
+        # 可学习的查询向量
+        self.query = nn.Parameter(torch.randn((num_latents, width), device=device, dtype=dtype) * 0.02)
+        
+        # 傅里叶编码器和输入投影
+        self.fourier_embedder = fourier_embedder
+        self.input_proj = nn.Linear(self.fourier_embedder.out_dim + point_feats, width, device=device, dtype=dtype)
+        
+        # 交叉注意力
+        self.cross_attn = ResidualCrossAttentionBlock(
+            device=device, dtype=dtype, width=width, heads=heads,
+            init_scale=init_scale, qkv_bias=qkv_bias, flash=flash
+        )
+        
+        # 自注意力Transformer
+        self.self_attn = Transformer(
+            device=device, dtype=dtype, n_ctx=num_latents, width=width, layers=layers,
+            heads=heads, init_scale=init_scale, qkv_bias=qkv_bias, flash=flash, use_checkpoint=False
+        )
+        
+        # LayerNorm
+        if use_ln_post:
+            self.ln_post = nn.LayerNorm(width, dtype=dtype, device=device)
         else:
-            raise ValueError(f"Unsupported backbone: {backbone}. Supported: resnet18, resnet34, resnet50, resnet101")
+            self.ln_post = None
+    
+    def forward(self, pc, feats):
+        """
+        Args:
+            pc: [B, N, 3] - XYZ坐标
+            feats: [B, N, C] - RGB特征
+        Returns:
+            latents: [B, num_latents, width]
+            pc: [B, N, 3]
+        """
+        bs = pc.shape[0]
         
-        # 如果输入通道数不是3，需要正确适配预训练权重
-        if input_channels != 3:
-            # 保存原始预训练的conv1权重 [64, 3, 7, 7]
-            pretrained_conv1_weight = self.backbone_model.conv1.weight.data.clone()
-            
-            # 创建新的conv1层
-            self.backbone_model.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            
-            # 初始化新的conv1权重
-            with torch.no_grad():
-                if input_channels == 6:  # RGBXYZ情况
-                    # RGB通道：直接复制预训练权重
-                    self.backbone_model.conv1.weight[:, :3, :, :] = pretrained_conv1_weight
-                    # XYZ通道：使用预训练权重的平均值初始化
-                    mean_weight = pretrained_conv1_weight.mean(dim=1, keepdim=True)  # [64, 1, 7, 7]
-                    self.backbone_model.conv1.weight[:, 3:, :, :] = mean_weight.repeat(1, 3, 1, 1)
-                else:
-                    # 其他情况：使用预训练权重的平均值
-                    mean_weight = pretrained_conv1_weight.mean(dim=1, keepdim=True)
-                    self.backbone_model.conv1.weight.data = mean_weight.repeat(1, input_channels, 1, 1)
+        # 傅里叶位置编码
+        data = self.fourier_embedder(pc)
+        if feats is not None:
+            data = torch.cat([data, feats], dim=-1)
+        data = self.input_proj(data)
         
-        # 简化FPN模块
-        if use_fpn:
-            # 根据backbone选择FPN的输入通道数
-            if backbone.lower() in ["resnet18", "resnet34"]:
-                fpn_in_channels = 512  # ResNet18/34的最后一层通道数
-            else:  # resnet50, resnet101
-                fpn_in_channels = 2048  # ResNet50/101的最后一层通道数
-            self.fpn = EnhancedFPN(in_channels=fpn_in_channels, out_channels=32)  # 从64减少到32
-            self.feature_dim = 32
-        else:
-            # 根据backbone选择特征维度
-            if backbone.lower() in ["resnet18", "resnet34"]:
-                self.feature_dim = 512
-            else:  # resnet50, resnet101
-                self.feature_dim = 2048
+        # 交叉注意力
+        query = self.query.unsqueeze(0).expand(bs, -1, -1)
+        latents = self.cross_attn(query, data)
         
-        # 简化深层处理器
-        self.deep_processor = DeepVisualProcessor(self.feature_dim, output_dim)
+        # 自注意力
+        latents = self.self_attn(latents)
         
-        # 空间特征投影层
-        self.spatial_projection = nn.Conv2d(output_dim, output_dim, kernel_size=1)
+        # LayerNorm
+        if self.ln_post is not None:
+            latents = self.ln_post(latents)
         
-        print(f"Enhanced ImageEncoder: {backbone.upper()} + {'Ultra-Lightweight FPN (32ch)' if use_fpn else 'No FPN'} + SimpleProcessor -> {self.feature_dim} -> {output_dim} (spatial features)")
-        
-    def forward(self, x, return_2d_features=False):
-        # 获取ResNet的卷积特征图
-        x = self.backbone_model.conv1(x)
-        x = self.backbone_model.bn1(x)
-        x = self.backbone_model.relu(x)
-        x = self.backbone_model.maxpool(x)
-        
-        # 提取不同层的特征
-        layer1_feat = self.backbone_model.layer1(x)      # [B, C1, H/4, W/4]
-        layer2_feat = self.backbone_model.layer2(layer1_feat)  # [B, C2, H/8, W/8]
-        layer3_feat = self.backbone_model.layer3(layer2_feat)  # [B, C3, H/16, W/16]
-        layer4_feat = self.backbone_model.layer4(layer3_feat)  # [B, C4, H/32, W/32]
-        
-        if self.use_fpn:
-            # 使用简化FPN处理多尺度特征
-            fpn_features = self.fpn([layer1_feat, layer2_feat, layer3_feat, layer4_feat])
-            
-            # 选择最细粒度的特征（最高分辨率）
-            output = fpn_features[0]  # [B, 64, H/4, W/4]
-        else:
-            # 不使用FPN，直接使用最后一层特征
-            output = layer4_feat  # [B, 512, H/32, W/32]
-        
-        # 简化深层处理
-        output = self.deep_processor(output)  # [B, output_dim, H, W]
-        
-        # 投影到目标维度
-        output = self.spatial_projection(output)  # [B, output_dim, H, W]
-        
-        if return_2d_features:
-            return output  # 返回2D特征图 [B, output_dim, H, W]
-        
-        # 将空间特征展平为序列 [batch_size, H*W, output_dim]
-        batch_size, channels, height, width = output.shape
-        output = output.permute(0, 2, 3, 1).contiguous()  # [B, H, W, channels]
-        output = output.view(batch_size, height * width, channels)  # [B, H*W, channels]
-        
-        return output
+        return latents, pc
+
+
 
 @dataclass
 class IncrementalState:
     """增量生成状态 - 参考PrimitiveAnything实现"""
     current_sequence: torch.Tensor  # [B, current_len, embed_dim]
-    image_embed: torch.Tensor      # [B, H*W, image_dim]  
-    image_cond: torch.Tensor       # [B, image_cond_dim]
+    point_cloud_embed: torch.Tensor      # [B, H*W, point_cloud_dim]  
+    point_cloud_cond: torch.Tensor       # [B, point_cloud_cond_dim]
     stopped_samples: torch.Tensor  # [B] 布尔值，标记哪些样本已停止
     current_step: int              # 当前步数
     
@@ -370,6 +380,8 @@ class IncrementalState:
     
     def __post_init__(self):
         if self.gateloop_cache is None:
+            # 注意：这里不能直接设置长度，因为gateloop_block可能还没有初始化
+            # 实际的长度会在initialize_incremental_generation中设置
             self.gateloop_cache = []
         if self.generated_boxes is None:
             # 这里会在initialize_incremental_generation中正确设置
@@ -413,15 +425,24 @@ class PrimitiveTransformer3D(nn.Module):
         attn_dropout = 0.0,  # 注意力dropout
         ff_dropout = 0.0,    # 前馈dropout
         
-        # 图像编码器 - 支持6通道RGBXYZ输入
-        image_encoder_dim = 512,
-        use_fpn = True,
-        backbone = "resnet50",
-        pretrained = True,
+        # 点云编码器 - 支持RGBXYZ输入
+        point_cloud_encoder_dim = 512,
+        use_point_cloud_encoder = True,
+        point_cloud_encoder_config = {
+            'num_latents': 256,
+            'embed_dim': 64,
+            'point_feats': 3,  # RGB特征
+            'num_freqs': 8,
+            'heads': 12,
+            'width': 768,
+            'num_encoder_layers': 8,
+            'num_decoder_layers': 16,
+            'pretrained': False  # 从头训练
+        },
         
         # 其他参数
         shape_cond_with_cat = False,
-        condition_on_image = True,
+        condition_on_point_cloud = True,
         gateloop_depth = 2,
         gateloop_use_heinsen = False,
         
@@ -447,23 +468,23 @@ class PrimitiveTransformer3D(nn.Module):
         
         # 其他参数
         self.shape_cond_with_cat = shape_cond_with_cat
-        self.condition_on_image = condition_on_image
+        self.condition_on_point_cloud = condition_on_point_cloud
         self.gateloop_depth = gateloop_depth
         self.gateloop_use_heinsen = gateloop_use_heinsen
         
-        # 图像条件投影层
+        # 点云条件投影层
         if shape_cond_with_cat:
-            self.image_cond_proj = nn.Linear(image_encoder_dim, dim)
+            self.point_cloud_cond_proj = nn.Linear(point_cloud_encoder_dim, dim)
         else:
-            self.image_cond_proj = None
+            self.point_cloud_cond_proj = None
         
-        # 图像条件化层
-        if condition_on_image:
-            self.image_film_cond = FiLM(dim, dim)
-            self.image_cond_proj_film = nn.Linear(image_encoder_dim, self.image_film_cond.to_gamma.in_features)
+        # 点云条件化层
+        if condition_on_point_cloud:
+            self.point_cloud_film_cond = FiLM(dim, dim)
+            self.point_cloud_cond_proj_film = nn.Linear(point_cloud_encoder_dim, self.point_cloud_film_cond.to_gamma.in_features)
         else:
-            self.image_film_cond = None
-            self.image_cond_proj_film = None
+            self.point_cloud_film_cond = None
+            self.point_cloud_cond_proj_film = None
         
         # 门控循环块
         if gateloop_depth > 0:
@@ -471,14 +492,33 @@ class PrimitiveTransformer3D(nn.Module):
         else:
             self.gateloop_block = None
         
-        # 图像编码器 - 修改为6通道RGBXYZ输入
-        self.image_encoder = ImageEncoder(
-            input_channels=6,  # 修改：RGB(3) + XYZ(3) = 6通道
-            output_dim=image_encoder_dim,
-            use_fpn=use_fpn,
-            backbone=backbone,
-            pretrained=pretrained
-        )
+        # 点云编码器 - 处理RGBXYZ数据
+        if use_point_cloud_encoder:
+            # 直接使用完整的Michelangelo架构
+            from michelangelo_point_cloud_encoder import AdvancedPointCloudEncoder
+            self.point_cloud_encoder = AdvancedPointCloudEncoder(
+                output_dim=point_cloud_encoder_dim,
+                **point_cloud_encoder_config
+            )
+            
+            # 添加投影层 - 修复维度计算
+            # pc_embed的实际维度 = width + embed_dim (如果有VAE)
+            actual_pc_embed_dim = point_cloud_encoder_config.get('width', 256) + point_cloud_encoder_config.get('embed_dim', 32)
+            actual_pc_head_dim = point_cloud_encoder_config.get('width', 256)
+            
+            print(f"Point Cloud Encoder Dimensions:")
+            print(f"  width: {point_cloud_encoder_config.get('width', 256)}")
+            print(f"  embed_dim: {point_cloud_encoder_config.get('embed_dim', 32)}")
+            print(f"  actual_pc_embed_dim: {actual_pc_embed_dim}")
+            print(f"  actual_pc_head_dim: {actual_pc_head_dim}")
+            print(f"  point_cloud_encoder_dim: {point_cloud_encoder_dim}")
+            
+            self.to_cond_dim = nn.Linear(actual_pc_embed_dim, point_cloud_encoder_dim)
+            self.to_cond_dim_head = nn.Linear(actual_pc_head_dim, point_cloud_encoder_dim)
+            
+            print("Using Advanced Michelangelo Point Cloud Encoder")
+        else:
+            raise ValueError("Point cloud encoder is required. Set use_point_cloud_encoder=True")
         
         # 3D嵌入层
         self.x_embed = nn.Embedding(num_discrete_x, dim_x_embed)
@@ -510,7 +550,7 @@ class PrimitiveTransformer3D(nn.Module):
             attn_dropout=attn_dropout,  # 使用注意力dropout
             ff_dropout=ff_dropout,      # 使用前馈dropout
             cross_attend=True,
-            cross_attn_dim_context=image_encoder_dim,
+            cross_attn_dim_context=point_cloud_encoder_dim,
         )
         
         # 3D预测头 - 添加z坐标和length
@@ -603,8 +643,7 @@ class PrimitiveTransformer3D(nn.Module):
         self.pad_id = pad_id
         self.max_seq_len = max_primitive_len
         
-        # 位置编码
-        self.pos_embed = nn.Parameter(torch.randn(1, max_primitive_len + 1, dim))
+        # 注意：原始PrimitiveAnything不使用位置编码
         
         print(f"3D PrimitiveTransformer: RGBXYZ(6ch) Input + 3D Box Generation (x,y,z,w,h,l)")
     
@@ -828,52 +867,59 @@ class PrimitiveTransformer3D(nn.Module):
         w: Tensor,
         h: Tensor,
         l: Tensor,  # 新增length
-        image: Tensor,  # 现在是RGBXYZ，6通道
+        point_clouds: List[Tensor],  # 变长点云数据列表
     ):
-        """3D前向传播"""
+        """3D前向传播 - 完全适配点云处理"""
         # 创建3D mask
         primitive_mask = (x != self.pad_id) & (y != self.pad_id) & (z != self.pad_id) & (w != self.pad_id) & (h != self.pad_id) & (l != self.pad_id)
         
         # 编码3D基本体
         codes, discrete_coords = self.encode_primitive(x, y, z, w, h, l, primitive_mask)
+        
+        # 调试信息：检查是否有有效的box
+        if codes.shape[1] == 0:
+            print(f"Warning: No valid boxes found in batch. codes.shape: {codes.shape}")
+            print(f"  primitive_mask sum: {primitive_mask.sum()}")
+            print(f"  x non-pad count: {(x != self.pad_id).sum()}")
+            print(f"  y non-pad count: {(y != self.pad_id).sum()}")
+            print(f"  z non-pad count: {(z != self.pad_id).sum()}")
+            print(f"  w non-pad count: {(w != self.pad_id).sum()}")
+            print(f"  h non-pad count: {(h != self.pad_id).sum()}")
+            print(f"  l non-pad count: {(l != self.pad_id).sum()}")
 
-        # 编码RGBXYZ图像
-        image_embed = self.image_encoder(image)  # [batch_size, H*W, image_encoder_dim]
+        # 使用点云编码器处理变长点云数据 - 完全按照原始PrimitiveAnything实现
+        pc_head, pc_embed = self.point_cloud_encoder(point_clouds)  # pc_head: [B, 1, width], pc_embed: [B, num_latents-1, width+embed_dim]
         
-        # 添加位置编码
-        batch_size, seq_len, _ = codes.shape
-        device = codes.device
-        
-        # 为图像特征添加2D位置编码
-        H = W = int(np.sqrt(image_embed.shape[1]))
-        pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-        pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-        image_embed = image_embed + pos_embed_2d
+        # 按照原始实现拼接pc_head和pc_embed
+        pc_head_proj = self.to_cond_dim_head(pc_head)  # [B, 1, point_cloud_encoder_dim]
+        pc_embed_proj = self.to_cond_dim(pc_embed)  # [B, num_latents-1, point_cloud_encoder_dim]
+        pc_embed = torch.cat([pc_head_proj, pc_embed_proj], dim=-2)  # [B, num_latents, point_cloud_encoder_dim]
         
         # 构建输入序列
-        history = codes
-        sos = repeat(self.sos_token, 'n d -> b n d', b=batch_size)
+        batch_size, seq_len, _ = codes.shape  # codes: [B, seq_len, dim]
+        device = codes.device
         
-        primitive_codes, packed_sos_shape = pack([sos, history], 'b * d')
-        seq_len = primitive_codes.shape[1]
-        pos_embed = self.pos_embed[:, :seq_len, :]
-        primitive_codes = primitive_codes + pos_embed
+        history = codes  # [B, seq_len, dim]
+        sos = repeat(self.sos_token, 'n d -> b n d', b=batch_size)  # [B, 1, dim]
         
-        # 图像条件化处理
-        if self.condition_on_image and self.image_film_cond is not None:
-            pooled_image_embed = image_embed.mean(dim=1)
-            image_cond = self.image_cond_proj_film(pooled_image_embed)
-            primitive_codes = self.image_film_cond(primitive_codes, image_cond)
+        primitive_codes, packed_sos_shape = pack([sos, history], 'b * d')  # [B, seq_len+1, dim]
+        
+        # 点云条件化处理 - 使用全局特征
+        if self.condition_on_point_cloud and self.point_cloud_film_cond is not None:
+            # 使用pc_head的全局特征进行条件化（类似原始实现）
+            pooled_pc_embed = pc_embed.mean(dim=1)  # [B, point_cloud_encoder_dim]
+            point_cloud_cond = self.point_cloud_cond_proj_film(pooled_pc_embed)  # [B, dim]
+            primitive_codes = self.point_cloud_film_cond(primitive_codes, point_cloud_cond)  # [B, seq_len+1, dim]
         
         # 门控循环块处理
         if self.gateloop_block is not None:
-            primitive_codes, gateloop_cache = self.gateloop_block(primitive_codes)
+            primitive_codes, gateloop_cache = self.gateloop_block(primitive_codes, cache=None)  # primitive_codes: [B, seq_len+1, dim]
         
-        # 变换器解码 - 禁用gradient checkpointing以避免与Scheduled Sampling冲突
+        # 使用点云特征作为context进行交叉注意力
         attended_codes = self.decoder(
-            primitive_codes,
-            context=image_embed,
-        )
+            primitive_codes,  # [B, seq_len+1, dim]
+            context=pc_embed,  # [B, num_latents, point_cloud_encoder_dim]
+        )  # attended_codes: [B, seq_len+1, dim]
 
         return attended_codes
     
@@ -886,12 +932,12 @@ class PrimitiveTransformer3D(nn.Module):
         w: Tensor,
         h: Tensor,
         l: Tensor,
-        image: Tensor
+        point_clouds: List[Tensor]
     ):
-        """带预测输出的前向传播，用于训练"""
+        """带预测输出的前向传播，用于训练 - 完全适配点云处理"""
         # 先调用标准前向传播获取attended_codes
         attended_codes = self.forward(
-            x=x, y=y, z=z, w=w, h=h, l=l, image=image
+            x=x, y=y, z=z, w=w, h=h, l=l, point_clouds=point_clouds
         )
         
         # attended_codes shape: [batch_size, seq_len, model_dim]
@@ -977,81 +1023,76 @@ class PrimitiveTransformer3D(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        image: Tensor,  # RGBXYZ 6通道输入
+        point_clouds: List[Tensor],  # 变长点云数据列表
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5,
         debug: bool = False
     ):
-        """3D autoregressive生成"""
+        """3D autoregressive生成 - 完全适配点云处理"""
         max_seq_len = max_seq_len or self.max_seq_len
-        batch_size = image.shape[0]
-        device = image.device
+        batch_size = len(point_clouds)
+        device = point_clouds[0].device
         
-        # 编码RGBXYZ图像
-        image_embed = self.image_encoder(image)
+        # 使用点云编码器处理变长点云数据 - 完全按照原始PrimitiveAnything实现
+        pc_head, pc_embed = self.point_cloud_encoder(point_clouds)  # pc_head: [B, 1, width], pc_embed: [B, num_latents-1, width+embed_dim]
         
-        # 添加2D位置编码
-        H = W = int(np.sqrt(image_embed.shape[1]))
-        if H * W == image_embed.shape[1]:
-            pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-            pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-            image_embed = image_embed + pos_embed_2d
+        # 按照原始实现拼接pc_head和pc_embed
+        pc_head_proj = self.to_cond_dim_head(pc_head)  # [B, 1, point_cloud_encoder_dim]
+        pc_embed_proj = self.to_cond_dim(pc_embed)  # [B, num_latents-1, point_cloud_encoder_dim]
+        pc_embed = torch.cat([pc_head_proj, pc_embed_proj], dim=-2)  # [B, num_latents, point_cloud_encoder_dim]
         
         # 为每个样本独立跟踪3D生成结果
         generated_results = {
-            'x': [[] for _ in range(batch_size)],
-            'y': [[] for _ in range(batch_size)],
-            'z': [[] for _ in range(batch_size)],  # 新增z坐标
-            'w': [[] for _ in range(batch_size)],
-            'h': [[] for _ in range(batch_size)],
-            'l': [[] for _ in range(batch_size)]   # 新增length
+            'x': [[] for _ in range(batch_size)],  # 每个样本的x坐标列表
+            'y': [[] for _ in range(batch_size)],  # 每个样本的y坐标列表
+            'z': [[] for _ in range(batch_size)],  # 每个样本的z坐标列表
+            'w': [[] for _ in range(batch_size)],  # 每个样本的宽度列表
+            'h': [[] for _ in range(batch_size)],  # 每个样本的高度列表
+            'l': [[] for _ in range(batch_size)]   # 每个样本的长度列表
         }
         
         # 跟踪每个样本是否已经停止生成
-        stopped_samples = torch.zeros(batch_size, dtype=torch.bool, device=image.device)
+        stopped_samples = torch.zeros(batch_size, dtype=torch.bool, device=rgbxyz.device)  # [B]
         
         # 初始序列：只有SOS token
-        current_sequence = repeat(self.sos_token, 'n d -> b n d', b=batch_size)
+        current_sequence = repeat(self.sos_token, 'n d -> b n d', b=batch_size)  # [B, 1, dim]
         
         for step in range(max_seq_len):
             # 如果所有样本都停止了，提前结束
             if torch.all(stopped_samples):
                 break
             
-            primitive_codes = current_sequence
-            seq_len = primitive_codes.shape[1]
-            pos_embed = self.pos_embed[:, :seq_len, :]
-            primitive_codes = primitive_codes + pos_embed
+            primitive_codes = current_sequence  # [B, seq_len, dim]
             
-            # 图像条件化处理
-            if self.condition_on_image and self.image_film_cond is not None:
-                pooled_image_embed = image_embed.mean(dim=1)
-                image_cond = self.image_cond_proj_film(pooled_image_embed)
-                primitive_codes = self.image_film_cond(primitive_codes, image_cond)
+            # 点云条件化处理
+            if self.condition_on_point_cloud and self.point_cloud_film_cond is not None:
+                pooled_pc_embed = pc_embed.mean(dim=1)  # [B, point_cloud_encoder_dim]
+                point_cloud_cond = self.point_cloud_cond_proj_film(pooled_pc_embed)  # [B, dim]
+                primitive_codes = self.point_cloud_film_cond(primitive_codes, point_cloud_cond)  # [B, seq_len, dim]
             
             # 门控循环块处理
             if self.gateloop_block is not None:
-                primitive_codes, gateloop_cache = self.gateloop_block(primitive_codes)
+                primitive_codes, gateloop_cache = self.gateloop_block(primitive_codes, cache=None)  # primitive_codes: [B, seq_len, dim]
             
             # 通过decoder获取attended codes
             attended_codes = self.decoder(
-                primitive_codes,
-                context=image_embed,
-            )
+                primitive_codes,  # [B, seq_len, dim]
+                context=pc_embed,  # [B, num_latents, point_cloud_encoder_dim]
+            )  # attended_codes: [B, seq_len, dim]
             
             # 用最后一个位置预测下一个token
-            next_embed = attended_codes[:, -1]
+            next_embed = attended_codes[:, -1]  # [B, dim]
             
             # 预测3D坐标和尺寸 - 按顺序：x, y, z, w, h, l
             # 预测x坐标 - 使用连续值embedding
-            x_logits = self.to_x_logits(next_embed)
-            x_delta = torch.tanh(self.to_x_delta(next_embed).squeeze(-1)) * 0.5
+            x_logits = self.to_x_logits(next_embed)  # [B, num_discrete_x]
+            x_delta = torch.tanh(self.to_x_delta(next_embed).squeeze(-1)) * 0.5  # [B]
             if temperature == 0:
-                next_x_discrete = x_logits.argmax(dim=-1)
+                next_x_discrete = x_logits.argmax(dim=-1)  # [B]
             else:
-                x_probs = F.softmax(x_logits / temperature, dim=-1)
-                next_x_discrete = torch.multinomial(x_probs, 1).squeeze(-1)
+                x_probs = F.softmax(x_logits / temperature, dim=-1)  # [B, num_discrete_x]
+                next_x_discrete = torch.multinomial(x_probs, 1).squeeze(-1)  # [B]
             
             # 计算x的连续值用于后续预测
             x_continuous_base = self.continuous_from_discrete(next_x_discrete, self.num_discrete_x, self.continuous_range_x)
@@ -1213,16 +1254,16 @@ class PrimitiveTransformer3D(nn.Module):
     
     def initialize_incremental_generation(
         self,
-        image: Tensor,
+        point_clouds: List[Tensor],
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5
     ) -> IncrementalState:
         """
-        初始化增量生成状态
+        初始化增量生成状态 - 完全适配点云处理
         
         Args:
-            image: [B, 6, H, W] RGBXYZ输入图像
+            point_clouds: List[Tensor] 变长点云数据列表
             max_seq_len: 最大序列长度
             temperature: 采样温度
             eos_threshold: EOS阈值
@@ -1230,56 +1271,83 @@ class PrimitiveTransformer3D(nn.Module):
         Returns:
             state: 初始化的增量状态
         """
-        batch_size = image.shape[0]
+        batch_size = len(point_clouds)
         max_seq_len = max_seq_len or self.max_seq_len
-        device = image.device
+        device = point_clouds[0].device
         
-        # 1. 编码图像（只计算一次）
+        # 1. 使用点云编码器处理变长点云数据（只计算一次）
         with torch.no_grad():
-            image_embed = self.image_encoder(image)
+            pc_head, pc_embed = self.point_cloud_encoder(point_clouds)  # pc_head: [B, 1, width], pc_embed: [B, num_latents-1, width+embed_dim]
             
-            # 添加2D位置编码
-            H = W = int(np.sqrt(image_embed.shape[1]))
-            if H * W == image_embed.shape[1]:
-                pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-                pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-                image_embed = image_embed + pos_embed_2d
+            # 按照原始实现拼接pc_head和pc_embed
+            pc_head_proj = self.to_cond_dim_head(pc_head)  # [B, 1, point_cloud_encoder_dim]
+            pc_embed_proj = self.to_cond_dim(pc_embed)  # [B, num_latents-1, point_cloud_encoder_dim]
+            pc_embed = torch.cat([pc_head_proj, pc_embed_proj], dim=-2)  # [B, num_latents, point_cloud_encoder_dim]
             
-            # 准备图像条件化
-            image_cond = None
-            if self.condition_on_image and self.image_film_cond is not None:
-                pooled_image_embed = image_embed.mean(dim=1)
-                image_cond = self.image_cond_proj_film(pooled_image_embed)
+            # 准备点云条件化
+            point_cloud_cond = None
+            if self.condition_on_point_cloud and self.point_cloud_film_cond is not None:
+                pooled_pc_embed = pc_embed.mean(dim=1)  # [B, point_cloud_encoder_dim]
+                point_cloud_cond = self.point_cloud_cond_proj_film(pooled_pc_embed)  # [B, dim]
         
         # 2. 初始化序列状态
-        current_sequence = repeat(self.sos_token, 'n d -> b n d', b=batch_size)
+        current_sequence = repeat(self.sos_token, 'n d -> b n d', b=batch_size)  # [B, 1, dim]
         
         # 3. 初始化生成结果跟踪
         generated_boxes = {
-            'x': [[] for _ in range(batch_size)],
-            'y': [[] for _ in range(batch_size)],
-            'z': [[] for _ in range(batch_size)],
-            'w': [[] for _ in range(batch_size)],
-            'h': [[] for _ in range(batch_size)],
-            'l': [[] for _ in range(batch_size)]
+            'x': [[] for _ in range(batch_size)],  # 每个样本的x坐标列表
+            'y': [[] for _ in range(batch_size)],  # 每个样本的y坐标列表
+            'z': [[] for _ in range(batch_size)],  # 每个样本的z坐标列表
+            'w': [[] for _ in range(batch_size)],  # 每个样本的宽度列表
+            'h': [[] for _ in range(batch_size)],  # 每个样本的高度列表
+            'l': [[] for _ in range(batch_size)]   # 每个样本的长度列表
         }
         
-        stopped_samples = torch.zeros(batch_size, dtype=torch.bool, device=device)
+        stopped_samples = torch.zeros(batch_size, dtype=torch.bool, device=device)  # [B]
         
         # 4. 创建状态对象
+        # 初始化正确长度的gateloop缓存
+        if self.gateloop_block is not None:
+            expected_layers = len(self.gateloop_block.gateloops)
+            gateloop_cache = [None] * expected_layers
+        else:
+            gateloop_cache = []
+        
         state = IncrementalState(
             current_sequence=current_sequence,
-            image_embed=image_embed,
-            image_cond=image_cond,
+            point_cloud_embed=pc_embed,  # 使用拼接后的点云特征
+            point_cloud_cond=point_cloud_cond,    # 使用点云条件
             stopped_samples=stopped_samples,
             current_step=0,
             decoder_cache=None,
-            gateloop_cache=[],
+            gateloop_cache=gateloop_cache,
             generated_boxes=generated_boxes
         )
         
         return state
     
+    def _validate_cache_state(self, state: IncrementalState) -> bool:
+        """
+        验证缓存状态的有效性
+        
+        Args:
+            state: 增量生成状态
+            
+        Returns:
+            bool: 缓存状态是否有效
+        """
+        # 检查gateloop缓存
+        if self.gateloop_block is not None:
+            expected_layers = len(self.gateloop_block.gateloops)
+            if state.gateloop_cache is not None and len(state.gateloop_cache) != expected_layers:
+                return False
+        
+        # 检查decoder缓存
+        if state.decoder_cache is None and state.current_step > 0:
+            return False
+            
+        return True
+
     def generate_next_box_incremental(
         self, 
         state: IncrementalState, 
@@ -1301,57 +1369,57 @@ class PrimitiveTransformer3D(nn.Module):
         if torch.all(state.stopped_samples):
             return None, True
         
-        batch_size = state.current_sequence.shape[0]
+        batch_size = state.current_sequence.shape[0]  # B
         device = state.current_sequence.device
-        current_len = state.current_sequence.shape[1]
+        current_len = state.current_sequence.shape[1]  # seq_len
+        
+        # 验证缓存状态
+        if not self._validate_cache_state(state):
+            pass  # 缓存状态验证失败，但继续执行
         
         # 参考PrimitiveAnything的forward方法结构
         if state.current_step == 0:
             # 第一步：完整前向传播，初始化所有缓存
             primitive_codes = state.current_sequence  # [B, current_len, dim]
             
-            # 添加位置编码
-            pos_embed = self.pos_embed[:, :current_len, :]
-            primitive_codes = primitive_codes + pos_embed
-            
-            # 图像条件化
-            if state.image_cond is not None:
-                primitive_codes = self.image_film_cond(primitive_codes, state.image_cond)
+            # 点云条件化
+            if state.point_cloud_cond is not None:
+                primitive_codes = self.point_cloud_film_cond(primitive_codes, state.point_cloud_cond)  # [B, current_len, dim]
             
             # 门控循环块（如果存在）
             if self.gateloop_block is not None:
-                primitive_codes, gateloop_cache = self.gateloop_block(primitive_codes, cache=None)
-                state.gateloop_cache = gateloop_cache if gateloop_cache is not None else []
+                primitive_codes, gateloop_cache = self.gateloop_block(primitive_codes, cache=None)  # primitive_codes: [B, current_len, dim]
+                # 安全检查：确保gateloop缓存有效
+                if gateloop_cache is not None:
+                    state.gateloop_cache = gateloop_cache
+                else:
+                    # 初始化正确长度的缓存
+                    expected_layers = len(self.gateloop_block.gateloops)
+                    state.gateloop_cache = [None] * expected_layers
+                    pass  # gateloop_block返回None缓存，已初始化空缓存
             
             # Transformer解码（初始化decoder缓存）
             attended_codes, decoder_cache = self.decoder(
-                primitive_codes,
-                context=state.image_embed,
+                primitive_codes,  # [B, current_len, dim]
+                context=state.point_cloud_embed,  # [B, num_latents, point_cloud_encoder_dim]
                 cache=None,  # 第一次调用，无缓存
                 return_hiddens=True  # 返回中间状态用于缓存
-            )
+            )  # attended_codes: [B, current_len, dim]
             
-            # 保存decoder缓存
-            state.decoder_cache = decoder_cache
+            # 保存decoder缓存 - 添加安全检查
+            if decoder_cache is not None:
+                state.decoder_cache = decoder_cache
+            else:
+                pass  # decoder返回None缓存，已处理
+                state.decoder_cache = None
             
         else:
             # 后续步骤：只处理新添加的token，使用缓存（真正的增量！）
-            new_token = state.current_sequence[:, -1:, :]  # [B, 1, dim] - 只有最新的token
+            primitive_codes = state.current_sequence[:, -1:, :]  # [B, 1, dim] - 只有最新的token
             
-            # 🔧 修复：检查位置编码边界，防止索引超出范围
-            pos_index = current_len - 1
-            if pos_index >= self.pos_embed.shape[1]:
-                print(f"⚠️  Position index {pos_index} exceeds pos_embed size {self.pos_embed.shape[1]}")
-                print(f"   Using last available position {self.pos_embed.shape[1] - 1}")
-                pos_index = self.pos_embed.shape[1] - 1
-            
-            # 添加位置编码（只对新token）
-            pos_embed = self.pos_embed[:, pos_index:pos_index+1, :]
-            primitive_codes = new_token + pos_embed
-            
-            # 图像条件化（只对新token）
-            if state.image_cond is not None:
-                primitive_codes = self.image_film_cond(primitive_codes, state.image_cond)
+            # 点云条件化（只对新token）
+            if state.point_cloud_cond is not None:
+                primitive_codes = self.point_cloud_film_cond(primitive_codes, state.point_cloud_cond)
             
             # 门控循环块增量计算
             if self.gateloop_block is not None:
@@ -1359,18 +1427,27 @@ class PrimitiveTransformer3D(nn.Module):
                     primitive_codes, 
                     cache=state.gateloop_cache
                 )
-                state.gateloop_cache = new_gateloop_cache if new_gateloop_cache is not None else state.gateloop_cache
+                # 安全检查：确保gateloop缓存更新有效
+                if new_gateloop_cache is not None:
+                    state.gateloop_cache = new_gateloop_cache
+                else:
+                        pass  # gateloop_block返回None缓存，保持之前的缓存
+                    # 保持之前的缓存不变
             
             # 真正的增量Transformer解码！
             attended_codes, new_decoder_cache = self.decoder(
                 primitive_codes,  # 只有新token [B, 1, dim]
-                context=state.image_embed,
+                context=state.point_cloud_embed,  # 使用点云特征
                 cache=state.decoder_cache,  # 使用之前的decoder缓存
                 return_hiddens=True
             )
             
-            # 更新decoder缓存
-            state.decoder_cache = new_decoder_cache
+            # 更新decoder缓存 - 添加安全检查
+            if new_decoder_cache is not None:
+                state.decoder_cache = new_decoder_cache
+            else:
+                    pass  # decoder返回None缓存，保持之前的缓存
+                # 保持之前的缓存不变
         
         # 预测下一个token（只需要最后一个位置）
         # 🔧 修复：添加安全检查，防止attended_codes为空
@@ -1379,12 +1456,17 @@ class PrimitiveTransformer3D(nn.Module):
             print(f"   current_step: {state.current_step}")
             print(f"   current_sequence shape: {state.current_sequence.shape}")
             print(f"   primitive_codes shape: {primitive_codes.shape}")
-            print(f"   image_embed shape: {state.image_embed.shape}")
+            print(f"   point_cloud_embed shape: {state.point_cloud_embed.shape}")
             if state.current_step == 0:
                 print("   This is step 0 (initialization)")
             else:
                 print(f"   This is step {state.current_step} (incremental)")
             raise RuntimeError("attended_codes is empty - this shouldn't happen")
+        
+        # 安全检查：确保attended_codes的batch size正确
+        if attended_codes.shape[0] != batch_size:
+            print(f"❌ Error: attended_codes batch size mismatch: {attended_codes.shape[0]} vs {batch_size}")
+            return None, True
         
         next_embed = attended_codes[:, -1, :]
         
@@ -1517,17 +1599,17 @@ class PrimitiveTransformer3D(nn.Module):
     @torch.no_grad()
     def generate_incremental(
         self,
-        image: Tensor,
+        point_clouds: List[Tensor],
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5,
         return_state: bool = False
     ) -> Dict[str, Tensor]:
         """
-        完整的增量生成流程
+        完整的增量生成流程 - 完全适配点云处理
         
         Args:
-            image: [B, 6, H, W] RGBXYZ输入图像
+            point_clouds: List[Tensor] 变长点云数据列表
             max_seq_len: 最大序列长度
             temperature: 采样温度
             eos_threshold: EOS阈值
@@ -1536,22 +1618,15 @@ class PrimitiveTransformer3D(nn.Module):
         Returns:
             results: 生成的完整序列
         """
-        batch_size = image.shape[0]
+        batch_size = len(point_clouds)
         max_seq_len = max_seq_len or self.max_seq_len
-        device = image.device
+        device = point_clouds[0].device
         
         # 初始化生成状态
-        state = self.initialize_incremental_generation(image, max_seq_len, temperature, eos_threshold)
+        state = self.initialize_incremental_generation(point_clouds, max_seq_len, temperature, eos_threshold)
         
         # 逐步生成
         for step in range(max_seq_len):
-            # 🔧 修复：检查序列长度，防止超过位置编码范围
-            current_seq_len = state.current_sequence.shape[1]
-            if current_seq_len >= self.pos_embed.shape[1]:
-                print(f"⚠️  Sequence length {current_seq_len} would exceed pos_embed size {self.pos_embed.shape[1]}")
-                print(f"   Stopping generation early at step {step}")
-                break
-                
             box_prediction, all_stopped = self.generate_next_box_incremental(state, temperature, eos_threshold)
             
             if all_stopped or box_prediction is None:

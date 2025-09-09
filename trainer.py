@@ -241,7 +241,7 @@ class AdvancedTrainer:
         discretization = model_config.get('discretization', {})
         embeddings = model_config.get('embeddings', {})
         transformer = model_config.get('transformer', {})
-        image_encoder = model_config.get('image_encoder', {})
+        point_cloud_encoder = model_config.get('point_cloud_encoder', {})
         conditioning = model_config.get('conditioning', {})
         advanced = model_config.get('advanced', {})
         
@@ -252,8 +252,8 @@ class AdvancedTrainer:
             raise ValueError("模型配置中缺少 'embeddings' 部分")
         if not transformer:
             raise ValueError("模型配置中缺少 'transformer' 部分")
-        if not image_encoder:
-            raise ValueError("模型配置中缺少 'image_encoder' 部分")
+        if not point_cloud_encoder:
+            raise ValueError("模型配置中缺少 'point_cloud_encoder' 部分")
         if not conditioning:
             raise ValueError("模型配置中缺少 'conditioning' 部分")
         if not advanced:
@@ -293,14 +293,13 @@ class AdvancedTrainer:
             attn_dropout=transformer['attn_dropout'],  # 注意力dropout
             ff_dropout=transformer['ff_dropout'],      # 前馈dropout
             
-            # 图像编码器参数
-            image_encoder_dim=image_encoder['output_dim'],
-            use_fpn=image_encoder['use_fpn'],
-            backbone=image_encoder['backbone'],
-            pretrained=image_encoder['pretrained'],
+            # 点云编码器参数
+            point_cloud_encoder_dim=point_cloud_encoder['output_dim'],
+            point_cloud_encoder_config=point_cloud_encoder.get('config', {}),
+            use_point_cloud_encoder=True,
             
             # 条件化配置
-            condition_on_image=conditioning['condition_on_image'],
+            condition_on_point_cloud=conditioning['condition_on_point_cloud'],
             gateloop_use_heinsen=advanced['gateloop_use_heinsen'],
             
             # 其他参数
@@ -346,46 +345,12 @@ class AdvancedTrainer:
             print(f"   GPU数量: {torch.cuda.device_count()}")
             print(f"   数据集路径: {dataset_config.get('data_root', 'N/A')}")
         
-        # 先创建数据集
-        from dataloader_3d import Box3DDataset
-        
-        # 🔧 修复：直接传递配置参数，不依赖外部配置文件
-        train_dataset = Box3DDataset(
-            data_root=dataset_config['data_root'],
-            stage="train",
-            max_boxes=global_config['max_seq_len'],
-            image_size=global_config['image_size'],
-            continuous_ranges=data_config['continuous_ranges'],
-            augmentation_config=data_config['augmentation']
-        )
-        
-        val_dataset = Box3DDataset(
-            data_root=dataset_config['data_root'],
-            stage="val",
-            max_boxes=global_config['max_seq_len'],
-            image_size=global_config['image_size'],
-            continuous_ranges=data_config['continuous_ranges'],
-            augmentation_config={}  # 验证时不使用数据增强
-        )
-        
-        # 分布式采样器 - 只有在真正的多GPU环境下才创建
-        if self.world_size > 1 and torch.cuda.device_count() > 1:
-            if self.is_main_process:
-                print(f"🚀 启用分布式采样器")
-            self.train_sampler = DistributedSampler(train_dataset)
-            self.val_sampler = DistributedSampler(val_dataset, shuffle=False)
-            if self.is_main_process:
-                print(f"✅ 分布式采样器创建完成")
-        else:
-            if self.world_size > 1 and self.is_main_process:
-                print(f"⚠️  检测到单GPU环境，禁用分布式采样器")
-            self.train_sampler = None
-            self.val_sampler = None
-            if self.is_main_process:
-                print(f"🖥️  使用普通数据加载器")
+        # 注意：数据集创建现在由create_dataloader函数内部处理
+        # 分布式采样器暂时禁用，因为create_dataloader不支持sampler参数
+        self.train_sampler = None
+        self.val_sampler = None
         
         # 创建数据加载器
-        from torch.utils.data import DataLoader
         
         # 多GPU时调整batch_size
         original_batch_size = dataloader_config['batch_size']
@@ -415,28 +380,34 @@ class AdvancedTrainer:
             print(f"❌ 错误: batch_size={effective_batch_size}，强制设置为1")
             effective_batch_size = 1
         
-        self.train_loader = DataLoader(
-            train_dataset,
+        self.train_loader = create_dataloader(
+            data_root=data_config['dataset']['data_root'],
+            stage='train',
             batch_size=effective_batch_size,
-            sampler=self.train_sampler,
-            shuffle=(self.train_sampler is None),  # 如果没有采样器则shuffle
+            shuffle=(self.train_sampler is None),
             num_workers=dataloader_config['num_workers'],
             pin_memory=dataloader_config['pin_memory'],
+            prefetch_factor=dataloader_config['prefetch_factor'],
+            persistent_workers=dataloader_config['persistent_workers'],
             drop_last=True,
-            prefetch_factor=dataloader_config['prefetch_factor'] if dataloader_config['num_workers'] > 0 else None,
-            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False
+            augmentation_config=data_config['augmentation'],
+            continuous_ranges=data_config['continuous_ranges'],
+            point_cloud_sample_ratio=dataloader_config.get('point_cloud_sample_ratio', 0.1)
         )
         
-        self.val_loader = DataLoader(
-            val_dataset,
+        self.val_loader = create_dataloader(
+            data_root=data_config['dataset']['data_root'],
+            stage='val',
             batch_size=effective_batch_size,
-            sampler=self.val_sampler,
             shuffle=False,
             num_workers=dataloader_config['num_workers'],
             pin_memory=dataloader_config['pin_memory'],
+            prefetch_factor=dataloader_config['prefetch_factor'],
+            persistent_workers=dataloader_config['persistent_workers'],
             drop_last=False,
-            prefetch_factor=dataloader_config['prefetch_factor'] if dataloader_config['num_workers'] > 0 else None,
-            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False
+            augmentation_config={},  # 验证时不使用数据增强
+            continuous_ranges=data_config['continuous_ranges'],
+            point_cloud_sample_ratio=dataloader_config.get('point_cloud_sample_ratio', 0.1)
         )
         
         # 优化器 - 移除硬编码
@@ -566,7 +537,7 @@ class AdvancedTrainer:
                 - 0.0~1.0: Scheduled Sampling (部分GT + 部分预测)
                 - 0.0: 纯Generation (100% 预测)
         """
-        rgbxyz = batch['image'].to(self.device)  # [B, 6, H, W]
+        point_clouds = [pc.to(self.device) for pc in batch['point_clouds']]  # List[Tensor] - 变长点云数据
         targets = {
             'x': batch['x'].to(self.device),
             'y': batch['y'].to(self.device),
@@ -594,27 +565,28 @@ class AdvancedTrainer:
                 w=inputs['w'],
                 h=inputs['h'],
                 l=inputs['l'],
-                image=rgbxyz
+                point_clouds=point_clouds
             )
             return outputs
         elif teacher_forcing_ratio == 0.0:
-            return self._forward_with_pure_generation(rgbxyz, targets, model)
+            return self._forward_with_pure_generation(point_clouds, targets, model)
         else:
-            return self._forward_with_scheduled_sampling(rgbxyz, targets, teacher_forcing_ratio, model)
+            return self._forward_with_scheduled_sampling(point_clouds, targets, teacher_forcing_ratio, model)
         
         
     
-    def _forward_with_scheduled_sampling(self, rgbxyz: torch.Tensor, targets: Dict, teacher_forcing_ratio: float, model) -> Dict:
+    def _forward_with_scheduled_sampling(self, point_clouds: List[torch.Tensor], targets: Dict, teacher_forcing_ratio: float, model) -> Dict:
         """Scheduled Sampling实现 - 支持梯度传播"""
-        batch_size = rgbxyz.size(0)
+        batch_size = len(point_clouds)
         seq_len = targets['x'].size(1)
-        device = rgbxyz.device
+        device = point_clouds[0].device
         
         # ===== 使用支持梯度的增量生成获取预测序列 =====
         # 生成完整的预测序列（保持梯度）
-        predicted_output = self._forward_with_gradient_preserving_generation(
-            model, rgbxyz, targets, seq_len, device
-        )
+        with torch.no_grad():
+            predicted_output = self._forward_with_gradient_preserving_generation(
+                model, point_clouds, targets, seq_len, device
+            )
         
         # 从预测输出中提取连续值
         continuous_predictions = predicted_output['continuous_dict']
@@ -672,45 +644,33 @@ class AdvancedTrainer:
             w=mixed_inputs['w'],
             h=mixed_inputs['h'],
             l=mixed_inputs['l'],
-            image=rgbxyz
+            point_clouds=point_clouds
         )
     
 
-    def _forward_with_pure_generation(self, rgbxyz: torch.Tensor, targets: Dict, model) -> Dict:
+    def _forward_with_pure_generation(self, point_clouds: List[torch.Tensor], targets: Dict, model) -> Dict:
         """Pure Generation训练 - 支持梯度传播的增量生成"""
-        batch_size = rgbxyz.size(0)
+        batch_size = len(point_clouds)
         seq_len = targets['x'].size(1)
-        device = rgbxyz.device
+        device = point_clouds[0].device
         
         # ===== 使用支持梯度的增量生成 =====
         return self._forward_with_gradient_preserving_generation(
-            model, rgbxyz, targets, seq_len, device
+            model, point_clouds, targets, seq_len, device
         )
     
 
-    def _forward_with_gradient_preserving_generation(self, model, rgbxyz: torch.Tensor, targets: Dict, seq_len: int, device: torch.device) -> Dict:
+    def _forward_with_gradient_preserving_generation(self, model, point_clouds: List[torch.Tensor], targets: Dict, seq_len: int, device: torch.device) -> Dict:
         """
         支持梯度的增量生成 - 使用真正的增量解码
         
         这个版本使用类似 generate_next_box_incremental 的逻辑，但保持梯度流动
         """
-        batch_size = rgbxyz.size(0)
+        batch_size = len(point_clouds)
         
-        # 1. 编码图像（只计算一次）
-        image_embed = model.image_encoder(rgbxyz)
-        
-        # 🔧 修复Bug：添加2D位置编码（与推理代码保持一致）
-        H = W = int(np.sqrt(image_embed.shape[1]))
-        if H * W == image_embed.shape[1]:
-            from primitive_anything_3d import build_2d_sine_positional_encoding
-            pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-            pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-            image_embed = image_embed + pos_embed_2d
-        
-        image_cond = None
-        if model.condition_on_image and model.image_film_cond is not None:
-            pooled_image_embed = image_embed.mean(dim=1)
-            image_cond = model.image_cond_proj_film(pooled_image_embed)
+        # 1. 编码点云数据（只计算一次）
+        # 注意：点云编码器在forward函数内部调用，这里不需要单独调用
+        # 点云条件化在forward函数内部处理
         
         # 2. 初始化序列状态
         from einops import repeat
@@ -1055,7 +1015,7 @@ class AdvancedTrainer:
                 eval_iou = self._compute_tf_evaluation_iou(tf_outputs, targets)
                 
                 # 2. 纯生成验证
-                rgbxyz = batch['image'].to(self.device)
+                point_clouds = [pc.to(self.device) for pc in batch['point_clouds']]
                 
                 if hasattr(self.model, 'module'):
                     model = self.model.module
@@ -1068,7 +1028,7 @@ class AdvancedTrainer:
                     # 🔧 修复：使用配置中的正确max_seq_len，而不是不存在的max_primitive_len
                     max_len = self.config_loader.get_global_config()['max_seq_len']
                     gen_results = model.generate_incremental(
-                        image=rgbxyz,
+                        point_clouds=point_clouds,
                         max_seq_len=max_len,
                         temperature=self.incremental_temperature
                     )
@@ -1077,7 +1037,7 @@ class AdvancedTrainer:
                     # 🔧 修复：使用配置中的正确max_seq_len
                     max_len = self.config_loader.get_global_config()['max_seq_len']
                     gen_results = model.generate(
-                        image=rgbxyz,
+                        point_clouds=point_clouds,
                         max_seq_len=max_len,
                         temperature=1.0
                     )
@@ -1115,7 +1075,7 @@ class AdvancedTrainer:
                         'ground_truth': targets,
                         'tf_loss': tf_loss_dict['total_loss'].item(),
                         'gen_iou': gen_metrics['iou'],
-                        'image_shape': rgbxyz.shape
+                        'image_shape': [len(point_clouds), point_clouds[0].shape[0], point_clouds[0].shape[1]]
                     })
         
         # 保存验证结果 - 只在主进程保存
@@ -1319,6 +1279,21 @@ class AdvancedTrainer:
             metrics: 包含各项统计信息的字典
         """
         try:
+            # 检查gen_results是否为None（当没有生成任何框时）
+            if gen_results is None:
+                return {
+                    'iou': 0.0,
+                    'num_generated_boxes': 0,
+                    'num_gt_boxes': targets['x'].shape[0] * targets['x'].shape[1],  # 总GT框数
+                    'overall_mean_error': 1.0,
+                    'x_error': 1.0,
+                    'y_error': 1.0,
+                    'z_error': 1.0,
+                    'w_error': 1.0,
+                    'h_error': 1.0,
+                    'l_error': 1.0
+                }
+            
             # 生成结果已经是连续值，直接使用
             processed_gen_results = {}
             target_seq_len = targets['x'].shape[1]  # GT的序列长度
@@ -1758,6 +1733,7 @@ class AdvancedTrainer:
             continuous_ranges=self.config_loader.get('data.dataset.continuous_ranges'),
             augmentation_config={},  # 测试时不使用数据增强
             num_workers=0,  # 测试时使用单进程
+            point_cloud_sample_ratio=self.config_loader.get('data.dataloader.point_cloud_sample_ratio', 0.5),
             pin_memory=False,
             prefetch_factor=2,
             persistent_workers=False
@@ -1787,7 +1763,7 @@ class AdvancedTrainer:
                     print(f"  📊 处理测试样本 {batch_idx + 1}/{len(test_loader)}")
                 
                 # 准备输入数据
-                rgbxyz = batch['image'].to(self.device)
+                point_clouds = [pc.to(self.device) for pc in batch['point_clouds']]
                 targets = {
                     'x': batch['x'].to(self.device),
                     'y': batch['y'].to(self.device),
@@ -1806,7 +1782,7 @@ class AdvancedTrainer:
                 
                 try:
                     # 检查输入数据的有效性
-                    if torch.isnan(rgbxyz).any() or torch.isinf(rgbxyz).any():
+                    if any(torch.isnan(pc).any() or torch.isinf(pc).any() for pc in point_clouds):
                         if self.is_main_process:
                             print(f"  ⚠️  输入数据包含NaN或Inf值，跳过此样本")
                         continue
@@ -1817,7 +1793,7 @@ class AdvancedTrainer:
                         # 🔧 修复：使用正确的max_seq_len参数
                         max_len = self.config_loader.get_global_config()['max_seq_len']
                         gen_results = model.generate_incremental(
-                            image=rgbxyz,
+                            point_clouds=point_clouds,
                             max_seq_len=max_len,
                             temperature=self.incremental_temperature
                         )
@@ -1826,7 +1802,7 @@ class AdvancedTrainer:
                         # 🔧 修复：使用正确的max_seq_len参数
                         max_len = self.config_loader.get_global_config()['max_seq_len']
                         gen_results = model.generate(
-                            image=rgbxyz,
+                            point_clouds=point_clouds,
                             max_seq_len=max_len,
                             temperature=1.0
                         )
@@ -1840,8 +1816,9 @@ class AdvancedTrainer:
                 except Exception as e:
                     if self.is_main_process:
                         print(f"  ❌ 生成过程中出错: {e}")
-                        print(f"  📊 输入图像形状: {rgbxyz.shape}")
-                        print(f"  📊 输入图像范围: [{rgbxyz.min().item():.4f}, {rgbxyz.max().item():.4f}]")
+                        print(f"  📊 输入点云数量: {len(point_clouds)}")
+                        print(f"  📊 输入点云形状: {[pc.shape for pc in point_clouds]}")
+                        print(f"  📊 输入点云范围: [{min(pc.min().item() for pc in point_clouds):.4f}, {max(pc.max().item() for pc in point_clouds):.4f}]")
                     continue
                 
                 # 计算生成指标
@@ -2178,7 +2155,7 @@ class AdvancedTrainer:
             phase_start_epoch = sum(p.epochs for p in self.training_phases[:phase_idx])
             
             for epoch_in_phase in range(phase.epochs):
-                if self.current_epoch < phase_start_epoch + epoch_in_phase:
+                if self.current_epoch > phase_start_epoch + epoch_in_phase:
                     continue  # 跳过已训练的epoch
                 
                 # 🔧 修复：计算正确的阶段内epoch位置

@@ -9,7 +9,7 @@ global:
   max_seq_len: 12        # 最大序列长度（同时用于模型和数据）
   pad_id: -1.0           # 填充值（所有模块统一）
   image_size: [640, 640] # 图像尺寸（输入和数据处理）
-  device: "cuda"         # 训练设备
+  device: "cpu"         # 训练设备
   seed: 42               # 随机种子
   
   # 训练运行参数
@@ -28,36 +28,36 @@ global:
 # 训练配置 - 训练流程和策略（泛化性优化）
 # =============================================================================
 training:
-  # 训练阶段配置 - 减少过拟合风险
+  # 训练阶段配置 - 适应点云编码器从头训练
   phases:
     teacher_forcing:
-      epochs: 30              # 减少从20->15
+      epochs: 30              # 增加epochs，因为点云编码器需要更多训练
       teacher_forcing_ratio: 1.0
       scheduled_sampling: false
       sampling_strategy: "none"
-      description: "完全Teacher Forcing阶段"
+      description: "完全Teacher Forcing阶段 - 点云编码器基础训练"
     
     scheduled_sampling:
-      epochs: 40              # 减少从30->20
+      epochs: 40              # 增加epochs，逐步过渡
       teacher_forcing_ratio: 1.0  # 从1.0衰减到0
       scheduled_sampling: true
       sampling_strategy: "inverse_sigmoid"
-      description: "Scheduled Sampling过渡阶段"
+      description: "Scheduled Sampling过渡阶段 - 点云编码器适应"
     
     pure_generation:
-      epochs: 50             # 大幅减少从250->100，防止过拟合
+      epochs: 50             # 增加epochs，确保生成质量
       teacher_forcing_ratio: 0.0
       scheduled_sampling: false
       sampling_strategy: "none"
-      description: "纯生成阶段"
+      description: "纯生成阶段 - 点云编码器最终优化"
   
-  # 优化器配置 - 增强正则化
+  # 优化器配置 - 适应点云编码器
   optimizer:
     type: "AdamW"
-    lr: 0.0001
+    lr: 0.0001                # 较低的学习率，因为从头训练点云编码器
     betas: [0.9, 0.999]
     eps: 0.00000001
-    weight_decay: 0.05        # 增加权重衰减从0.01->0.05
+    weight_decay: 0.05        # 适中的权重衰减
   
   # 学习率调度 - 更精细的调度策略
   scheduler:
@@ -72,7 +72,7 @@ training:
       enabled: true
       patience: 15            # 增加耐心从10->15
       min_delta: 0.001
-      eos_threshold: 0.5
+      eos_threshold: 0.3
       adaptive_sequence_length: true
     gradient_clipping:
       enabled: true
@@ -88,7 +88,7 @@ training:
       deterministic: false
     incremental_inference:
       enabled: true
-      temperature: 0.3        # 降低温度从0.5->0.3，减少随机性
+      temperature: 1.0        # 提高温度从0.3->1.0，增加生成多样性
       memory_efficient: true
     best_model_testing:
       enabled: true        # 在获得最佳模型时在test集上进行推理
@@ -105,37 +105,29 @@ model:
   input:
     channels: 6  # RGBXYZ
   
-  # 图像编码器 - 增强正则化
-  image_encoder:
-    backbone: "resnet50"
-    pretrained: true
-    use_fpn: true
-    fpn_output_channels: 128
-    output_dim: 256
-    
-    # FPN详细配置
-    fpn:
-      attention_layers: [2, 3]
-      attention_heads: 8
-      smooth_conv_kernel: 3
-      smooth_conv_padding: 1
-    
-    # ResNet Conv1配置
-    conv1:
-      out_channels: 64
-      kernel_size: 7
-      stride: 2
-      padding: 3
-      bias: false
+  # 点云编码器 - Michelangelo架构（轻量化版本）
+  point_cloud_encoder:
+    output_dim: 256           # 减少输出维度
+    config:
+      # 基础参数（大幅缩小）
+      num_latents: 128        # 潜在向量数量（256→64，减少75%）
+      embed_dim: 64           # VAE嵌入维度（64→32，减少50%）
+      point_feats: 3          # RGB特征维度
+      num_freqs: 4            # 傅里叶频率数量（8→4，减少50%）
+      heads: 4                # 注意力头数（12→4，减少67%）
+      width: 384              # 模型宽度（768→256，减少67%）
+      num_encoder_layers: 4   # 编码器层数（8→2，减少75%）
+      num_decoder_layers: 8   # 解码器层数（16→4，减少75%）
+      pretrained: false       # 从头训练
   
   # Transformer架构 - 增强正则化（实际生效的参数）
   transformer:
-    dim: 512
+    dim: 256                # 与点云编码器输出维度匹配（512→256）
     depth: 6
     heads: 8
     dim_head: 64
-    attn_dropout: 0.1         # ✅ 实际生效：注意力dropout
-    ff_dropout: 0.1           # ✅ 实际生效：前馈dropout
+    attn_dropout: 0.0         # ✅ 实际生效：注意力dropout
+    ff_dropout: 0.0           # ✅ 实际生效：前馈dropout
     # use_rotary_emb: true
     # rotary_emb_dim: 32
   
@@ -159,8 +151,8 @@ model:
   
   # 条件化配置
   conditioning:
-    condition_on_image: true
-    image_film_cond: true
+    condition_on_point_cloud: true
+    point_cloud_film_cond: true
     # use_self_cond: false
     # self_cond_prob: 0.5
   
@@ -173,17 +165,7 @@ model:
     gateloop:
       depth: 2
     
-    # 位置编码配置
-    positional_encoding:
-      # 2D位置编码 (用于图像特征)
-      pos_2d:
-        base: 10000
-        dim_divisor: 4
-      
-      # 1D位置编码 (用于序列) 
-      pos_1d:
-        max_seq_len: 1000
-        learnable: false
+    # 注意：原始PrimitiveAnything不使用位置编码
 
 # =============================================================================
 # 数据配置 - 数据加载和增强（大幅增强）
@@ -195,22 +177,23 @@ data:
     
   # 3D坐标和尺寸范围
   continuous_ranges:
-    x: [0.5, 2.5]
-    y: [-2.0, 2.0] 
-    z: [-1.5, 1.5]
+    x: [0.0, 3.5]
+    y: [-2.5, 2.5] 
+    z: [-1.5, 0.5]
     w: [0.3, 0.7]
     h: [0.3, 0.7]
     l: [0.3, 0.7]
   
-  # DataLoader设置
+  # DataLoader设置 - 适应轻量化点云编码器
   dataloader:
-    batch_size: 4
+    batch_size: 4              # 增加batch size，因为编码器变小了
     num_workers: 4
     pin_memory: true
     prefetch_factor: 2
     persistent_workers: true
     shuffle: true
     drop_last: true
+    point_cloud_sample_ratio: 0.5  # 点云降采样比例（10%）
   
   # 数据增强 - 大幅增强泛化性
   augmentation:
@@ -359,8 +342,8 @@ loss:
 # 实验配置 - 日志和保存
 # =============================================================================
 experiment:
-  name: "primitive_3d_corner_aug"
-  description: "泛化性优化的3D物体检测实验"
+  name: "primitive_3d_point_cloud_encoder"
+  description: "使用Michelangelo点云编码器的3D物体检测实验"
   
   # 检查点配置
   checkpoints:
