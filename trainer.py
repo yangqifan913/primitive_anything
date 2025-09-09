@@ -669,8 +669,15 @@ class AdvancedTrainer:
         batch_size = len(point_clouds)
         
         # 1. 编码点云数据（只计算一次）
-        # 注意：点云编码器在forward函数内部调用，这里不需要单独调用
-        # 点云条件化在forward函数内部处理
+        with torch.no_grad():
+            pc_head, pc_embed = model.point_cloud_encoder(point_clouds)
+            # 投影到条件维度
+            pc_head_cond = model.to_cond_dim_head(pc_head)  # [B, 1, cond_dim]
+            pc_embed_cond = model.to_cond_dim(pc_embed)     # [B, num_latents-1, cond_dim]
+            point_cloud_cond = torch.cat([pc_head_cond, pc_embed_cond], dim=-2)  # [B, num_latents, cond_dim]
+            
+            # 为FiLM层准备条件：取全局平均池化
+            point_cloud_cond_for_film = point_cloud_cond.mean(dim=1)  # [B, cond_dim]
         
         # 2. 初始化序列状态
         from einops import repeat
@@ -693,13 +700,11 @@ class AdvancedTrainer:
                 # 第一步：完整前向传播，初始化缓存
                 primitive_codes = current_sequence
                 
-                # 添加位置编码
-                pos_embed = model.pos_embed[:, :current_len, :]
-                primitive_codes = primitive_codes + pos_embed
+                # 位置编码已删除，直接使用primitive_codes
                 
-                # 图像条件化
-                if image_cond is not None:
-                    primitive_codes = model.image_film_cond(primitive_codes, image_cond)
+                # 点云条件化
+                if model.condition_on_point_cloud and point_cloud_cond_for_film is not None:
+                    primitive_codes = model.point_cloud_film_cond(primitive_codes, point_cloud_cond_for_film)
                 
                 # 门控循环块（初始化缓存）
                 if model.gateloop_block is not None:
@@ -708,7 +713,7 @@ class AdvancedTrainer:
                 # Transformer解码（初始化decoder缓存）
                 attended_codes, decoder_cache = model.decoder(
                     primitive_codes,
-                    context=image_embed,
+                    context=point_cloud_cond,
                     cache=None,
                     return_hiddens=True
                 )
@@ -716,13 +721,12 @@ class AdvancedTrainer:
                 # 后续步骤：只处理新token（真正的增量！）
                 new_token = current_sequence[:, -1:, :]  # 只有最新的token
                 
-                # 添加位置编码（只对新token）
-                pos_embed = model.pos_embed[:, current_len-1:current_len, :]
-                primitive_codes = new_token + pos_embed
+                # 位置编码已删除，直接使用new_token
+                primitive_codes = new_token
                 
-                # 图像条件化（只对新token）
-                if image_cond is not None:
-                    primitive_codes = model.image_film_cond(primitive_codes, image_cond)
+                # 点云条件化（只对新token）
+                if model.condition_on_point_cloud and point_cloud_cond_for_film is not None:
+                    primitive_codes = model.point_cloud_film_cond(primitive_codes, point_cloud_cond_for_film)
                 
                 # 门控循环块增量计算
                 if model.gateloop_block is not None:
@@ -734,7 +738,7 @@ class AdvancedTrainer:
                 # 真正的增量Transformer解码！（保持梯度）
                 attended_codes, decoder_cache = model.decoder(
                     primitive_codes,
-                    context=image_embed,
+                    context=point_cloud_cond,
                     cache=decoder_cache,
                     return_hiddens=True
                 )
@@ -2138,6 +2142,14 @@ class AdvancedTrainer:
         for phase_idx in range(self.current_phase_idx, len(self.training_phases)):
             phase = self.training_phases[phase_idx]
             
+            # 添加阶段转换安全检查
+            if self.is_main_process:
+                print(f"🔍 检查阶段{phase_idx} ({phase.name})转换...")
+                print(f"   当前epoch: {self.current_epoch}")
+                print(f"   阶段epochs: {phase.epochs}")
+                print(f"   阶段起始epoch: {sum(p.epochs for p in self.training_phases[:phase_idx])}")
+                print(f"   阶段结束epoch: {sum(p.epochs for p in self.training_phases[:phase_idx+1])}")
+            
             if self.is_main_process:
                 print(f"\n{'='*60}")
                 print(f"🎯 训练阶段: {phase.name}")
@@ -2148,8 +2160,36 @@ class AdvancedTrainer:
                 print(f"{'='*60}")
             
             # 为当前阶段创建损失函数
-            loss_fn = self._create_loss_function(phase.name)
-            loss_fn = loss_fn.to(self.device)
+            try:
+                if self.is_main_process:
+                    print(f"🔧 正在创建{phase.name}阶段的损失函数...")
+                
+                # 清理GPU内存
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                loss_fn = self._create_loss_function(phase.name)
+                loss_fn = loss_fn.to(self.device)
+                
+                if self.is_main_process:
+                    print(f"✅ {phase.name}阶段损失函数创建成功")
+                    if torch.cuda.is_available():
+                        print(f"💾 GPU内存使用: {torch.cuda.memory_allocated()/1024**3:.2f}GB / {torch.cuda.memory_reserved()/1024**3:.2f}GB")
+                
+                # 分布式训练同步点
+                if self.world_size > 1:
+                    if self.is_main_process:
+                        print(f"🔄 等待所有进程同步...")
+                    torch.distributed.barrier()
+                    if self.is_main_process:
+                        print(f"✅ 所有进程同步完成")
+                        
+            except Exception as e:
+                if self.is_main_process:
+                    print(f"❌ 创建{phase.name}阶段损失函数失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+                raise
             
             # 计算阶段内的起始epoch
             phase_start_epoch = sum(p.epochs for p in self.training_phases[:phase_idx])
