@@ -104,30 +104,11 @@ class GateLoopBlock(nn.Module):
 
         return x, new_caches
 
-def build_2d_sine_positional_encoding(H, W, dim):
-    """
-    构建 [H, W, dim] 的 2D sine-cosine 位置编码
-    顺序：先左到右，再由下到上
-    """
-    # 修改顺序：先x（左到右），再y（下到上）
-    x_embed = torch.linspace(0, 1, steps=W).unsqueeze(0).repeat(H, 1)
-    y_embed = torch.linspace(0, 1, steps=H).unsqueeze(1).repeat(1, W)
-    
-    dim_t = torch.arange(dim // 4, dtype=torch.float32)
-    dim_t = 10000 ** (2 * (dim_t // 2) / (dim // 2))
-
-    pos_x = x_embed[..., None] / dim_t
-    pos_y = y_embed[..., None] / dim_t
-
-    pos_x = torch.stack((pos_x.sin(), pos_x.cos()), dim=-1).flatten(-2)
-    pos_y = torch.stack((pos_y.sin(), pos_y.cos()), dim=-1).flatten(-2)
-
-    pos = torch.cat((pos_x, pos_y), dim=-1)  # [H, W, dim] - 先x后y
-    return pos
 
 class EnhancedFPN(nn.Module):
     """超轻量版Feature Pyramid Network - 大幅降低内存占用"""
-    def __init__(self, in_channels, out_channels=32, attention_heads=2, attention_layers=None):  # 支持配置化
+    def __init__(self, in_channels, out_channels=32, attention_heads=2, attention_layers=None, 
+                 smooth_conv_kernel=3, smooth_conv_padding=1):  # 支持配置化
         super().__init__()
         self.out_channels = out_channels
         
@@ -140,9 +121,9 @@ class EnhancedFPN(nn.Module):
             nn.Conv2d(2048, out_channels, 1),  # layer4
         ])
         
-        # 简化的平滑层 - 只保留一层卷积
+        # 简化的平滑层 - 使用配置中的参数
         self.smooth_convs = nn.ModuleList([
-            nn.Conv2d(out_channels, out_channels, 3, padding=1)
+            nn.Conv2d(out_channels, out_channels, smooth_conv_kernel, padding=smooth_conv_padding)
             for _ in range(4)
         ])
         
@@ -233,12 +214,16 @@ class DeepVisualProcessor(nn.Module):
         return out + residual
 
 class ImageEncoder(nn.Module):
-    """简化版图像编码器 - 支持多种ResNet backbone + 简化FPN + 简化处理器"""
-    def __init__(self, input_channels=3, output_dim=256, use_fpn=True, backbone="resnet50", pretrained=True):  # 从256减少到192
+    """RGB图像编码器 - 只处理RGB数据，支持多种ResNet backbone + 简化FPN + 简化处理器"""
+    def __init__(self, input_channels=3, output_dim=256, use_fpn=True, backbone="resnet50", pretrained=True, 
+                 fpn_output_channels=128, fpn=None, conv1=None, **kwargs):
         super().__init__()
         self.use_fpn = use_fpn
         self.backbone = backbone
         self.pretrained = pretrained
+        self.fpn_output_channels = fpn_output_channels
+        self.fpn_config = fpn or {}
+        self.conv1_config = conv1 or {}
         
         # 根据配置选择backbone
         if backbone.lower() == "resnet18":
@@ -268,26 +253,8 @@ class ImageEncoder(nn.Module):
         else:
             raise ValueError(f"Unsupported backbone: {backbone}. Supported: resnet18, resnet34, resnet50, resnet101")
         
-        # 如果输入通道数不是3，需要正确适配预训练权重
-        if input_channels != 3:
-            # 保存原始预训练的conv1权重 [64, 3, 7, 7]
-            pretrained_conv1_weight = self.backbone_model.conv1.weight.data.clone()
-            
-            # 创建新的conv1层
-            self.backbone_model.conv1 = nn.Conv2d(input_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-            
-            # 初始化新的conv1权重
-            with torch.no_grad():
-                if input_channels == 6:  # RGBXYZ情况
-                    # RGB通道：直接复制预训练权重
-                    self.backbone_model.conv1.weight[:, :3, :, :] = pretrained_conv1_weight
-                    # XYZ通道：使用预训练权重的平均值初始化
-                    mean_weight = pretrained_conv1_weight.mean(dim=1, keepdim=True)  # [64, 1, 7, 7]
-                    self.backbone_model.conv1.weight[:, 3:, :, :] = mean_weight.repeat(1, 3, 1, 1)
-                else:
-                    # 其他情况：使用预训练权重的平均值
-                    mean_weight = pretrained_conv1_weight.mean(dim=1, keepdim=True)
-                    self.backbone_model.conv1.weight.data = mean_weight.repeat(1, input_channels, 1, 1)
+        # 确保输入通道数为3（RGB）
+        assert input_channels == 3, "ImageEncoder只处理RGB数据，input_channels必须为3"
         
         # 简化FPN模块
         if use_fpn:
@@ -296,8 +263,23 @@ class ImageEncoder(nn.Module):
                 fpn_in_channels = 512  # ResNet18/34的最后一层通道数
             else:  # resnet50, resnet101
                 fpn_in_channels = 2048  # ResNet50/101的最后一层通道数
-            self.fpn = EnhancedFPN(in_channels=fpn_in_channels, out_channels=32)  # 从64减少到32
-            self.feature_dim = 32
+            
+            # 使用配置中的FPN参数
+            fpn_out_channels = self.fpn_config.get('output_channels', 32)
+            attention_heads = self.fpn_config.get('attention_heads', 2)
+            attention_layers = self.fpn_config.get('attention_layers', [2, 3])
+            smooth_conv_kernel = self.fpn_config.get('smooth_conv_kernel', 3)
+            smooth_conv_padding = self.fpn_config.get('smooth_conv_padding', 1)
+            
+            self.fpn = EnhancedFPN(
+                in_channels=fpn_in_channels, 
+                out_channels=fpn_out_channels,
+                attention_heads=attention_heads,
+                attention_layers=attention_layers,
+                smooth_conv_kernel=smooth_conv_kernel,
+                smooth_conv_padding=smooth_conv_padding
+            )
+            self.feature_dim = fpn_out_channels
         else:
             # 根据backbone选择特征维度
             if backbone.lower() in ["resnet18", "resnet34"]:
@@ -312,6 +294,12 @@ class ImageEncoder(nn.Module):
         self.spatial_projection = nn.Conv2d(output_dim, output_dim, kernel_size=1)
         
         print(f"Enhanced ImageEncoder: {backbone.upper()} + {'Ultra-Lightweight FPN (32ch)' if use_fpn else 'No FPN'} + SimpleProcessor -> {self.feature_dim} -> {output_dim} (spatial features)")
+        
+        # 打印FPN配置信息
+        if use_fpn and self.fpn_config:
+            print(f"FPN配置: attention_layers={self.fpn_config.get('attention_layers', [2, 3])}, "
+                  f"attention_heads={self.fpn_config.get('attention_heads', 2)}, "
+                  f"smooth_conv_kernel={self.fpn_config.get('smooth_conv_kernel', 3)}")
         
     def forward(self, x, return_2d_features=False):
         # 获取ResNet的卷积特征图
@@ -352,12 +340,300 @@ class ImageEncoder(nn.Module):
         
         return output
 
+
+class PointCloudEncoder(nn.Module):
+    """点云编码器 - 使用PointTransformer处理点云数据"""
+    def __init__(self, output_dim=256, point_cloud_encoder_config=None):
+        super().__init__()
+        self.output_dim = output_dim
+        
+        # 导入PointTransformer
+        from point_transformer import PointTransformerV3
+        
+        # 创建点云编码器
+        # 如果传入了完整的point_cloud_encoder_config，使用它；否则使用基本参数
+        if point_cloud_encoder_config is not None:
+            # 使用传入的完整配置，但确保num_classes正确
+            final_point_cloud_config = point_cloud_encoder_config.copy()
+            final_point_cloud_config['num_classes'] = output_dim
+            
+            # 确保参数类型正确（元组而不是列表）
+            if 'order' in final_point_cloud_config and isinstance(final_point_cloud_config['order'], list):
+                final_point_cloud_config['order'] = tuple(final_point_cloud_config['order'])
+            if 'stride' in final_point_cloud_config and isinstance(final_point_cloud_config['stride'], list):
+                final_point_cloud_config['stride'] = tuple(final_point_cloud_config['stride'])
+            if 'enc_depths' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_depths'], list):
+                final_point_cloud_config['enc_depths'] = tuple(final_point_cloud_config['enc_depths'])
+            if 'enc_channels' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_channels'], list):
+                final_point_cloud_config['enc_channels'] = tuple(final_point_cloud_config['enc_channels'])
+            if 'enc_num_head' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_num_head'], list):
+                final_point_cloud_config['enc_num_head'] = tuple(final_point_cloud_config['enc_num_head'])
+            if 'enc_patch_size' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_patch_size'], list):
+                final_point_cloud_config['enc_patch_size'] = tuple(final_point_cloud_config['enc_patch_size'])
+        else:
+            # 向后兼容：使用基本参数构建配置
+            final_point_cloud_config = {
+                'in_channels': 3,  # XYZ数据
+                'num_classes': output_dim,  # 输出维度
+            }
+        
+        self.point_cloud_encoder = PointTransformerV3(**final_point_cloud_config)
+        
+        print(f"PointCloudEncoder: PointTransformer -> {output_dim} (point cloud features)")
+        
+        # 打印点云编码器配置信息
+        if point_cloud_encoder_config:
+            print(f"PointCloud配置:")
+            print(f"  基础参数: in_channels={final_point_cloud_config.get('in_channels', 3)}, "
+                  f"num_classes={final_point_cloud_config.get('num_classes', output_dim)}")
+            print(f"  编码器: depths={final_point_cloud_config.get('enc_depths', [2, 2, 2, 6, 2])}, "
+                  f"channels={final_point_cloud_config.get('enc_channels', [32, 64, 128, 256, 512])}")
+            print(f"  注意力: heads={final_point_cloud_config.get('enc_num_head', [2, 4, 8, 16, 32])}, "
+                  f"mlp_ratio={final_point_cloud_config.get('mlp_ratio', 4)}")
+            print(f"  Dropout: attn_drop={final_point_cloud_config.get('attn_drop', 0.0)}, "
+                  f"drop_path={final_point_cloud_config.get('drop_path', 0.3)}")
+        
+    def forward(self, data_dict):
+        """
+        处理点云数据，直接传递data_dict给PointTransformerV3
+        
+        Args:
+            data_dict: Dict - 点云数据字典，包含coord, grid_coord, offset, feat等字段
+            
+        Returns:
+            features: List[Tensor] - 点云特征列表，每个元素是[N_i, output_dim]
+            original_indices: List[Tensor] - 原始索引列表
+            pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
+        """
+        # 直接通过点云编码器处理整个batch
+        point, orig2cur = self.point_cloud_encoder(data_dict)
+        
+        # 提取特征 - point.feat应该是整个batch的特征
+        # 需要根据batch信息分割成各个样本的特征
+        features = []
+        original_indices = []
+        pixel_coords_out = []
+        
+        # 根据batch信息分割特征
+        batch_size = point.batch[-1] + 1  # 从batch字段获取batch大小
+        for i in range(batch_size):
+            # 找到属于第i个样本的点
+            sample_mask = point.batch == i
+            sample_feat = point.feat[sample_mask]  # [N_i, output_dim]
+            sample_indices = orig2cur[sample_mask]  # [N_i]
+            
+            features.append(sample_feat)
+            original_indices.append(sample_indices)
+            
+            # 如果有像素坐标，也进行分割
+            if hasattr(point, 'pixel_coords') and point.pixel_coords is not None:
+                sample_pixel_coords = point.pixel_coords[sample_mask]  # [N_i, 2]
+                pixel_coords_out.append(sample_pixel_coords)
+            else:
+                pixel_coords_out.append(None)
+        
+        return features, original_indices, pixel_coords_out
+    
+    def get_feature_pixel_mapping(self, features, original_indices, pixel_coords_out):
+        """
+        建立点云特征和原图像素的对应关系
+        
+        Args:
+            features: List[Tensor] - 点云特征列表，每个元素是[N_i, output_dim]
+            original_indices: List[Tensor] - 原始索引列表，每个元素是[N_i]，表示每个点对应哪个feature
+            pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
+            
+        Returns:
+            mapping: List[Dict] - 每个样本的对应关系字典列表
+                    每个字典的key是feature索引，value是包含该feature的所有点的信息
+                    格式: {feature_idx: {'feature': Tensor, 'points': List[Dict]}}
+        """
+        mapping = []
+        
+        for i in range(len(features)):
+            pc_feat_i = features[i]           # [N_i, output_dim]
+            orig_idx_i = original_indices[i]  # [N_i]
+            pixel_coord_i = pixel_coords_out[i]  # [N_i, 2]
+            
+            # 按feature索引分组
+            feature_groups = {}
+            
+            for j in range(pc_feat_i.shape[0]):
+                feature_idx = orig_idx_i[j].item()
+                
+                if feature_idx not in feature_groups:
+                    feature_groups[feature_idx] = {
+                        'feature': pc_feat_i[j],  # 这个feature的特征向量
+                        'points': []  # 属于这个feature的所有点
+                    }
+                
+                # 添加这个点的信息
+                feature_groups[feature_idx]['points'].append({
+                    'point_idx': j,  # 在原始点云中的索引
+                    'pixel_coord': pixel_coord_i[j],  # [2] - 像素坐标
+                    'point_coord': pc_feat_i[j]  # [output_dim] - 这个点的特征（与feature相同）
+                })
+            
+            mapping.append(feature_groups)
+        
+        return mapping
+
+
+class DualModalEncoder(nn.Module):
+    """双模态编码器 - 融合RGB图像和点云数据"""
+    def __init__(self, 
+                 image_encoder_config=None,
+                 point_cloud_encoder_config=None,
+                 fusion_dim=256):
+        super().__init__()
+        self.fusion_dim = fusion_dim
+        
+        # RGB图像编码器
+        # 如果传入了完整的image_encoder_config，使用它；否则使用基本参数
+        if image_encoder_config is not None:
+            # 使用传入的完整配置，但确保input_channels和output_dim正确
+            final_image_encoder_config = image_encoder_config.copy()
+            final_image_encoder_config['input_channels'] = 3
+            final_image_encoder_config['output_dim'] = fusion_dim // 2
+        else:
+            # 向后兼容：使用基本参数构建配置
+            final_image_encoder_config = {
+                'input_channels': 3,
+                'output_dim': fusion_dim // 2
+            }
+        
+        self.image_encoder = ImageEncoder(**final_image_encoder_config)
+        
+        # 点云编码器
+        self.point_cloud_encoder = PointCloudEncoder(
+            output_dim=fusion_dim // 2,  # 各占一半维度
+            point_cloud_encoder_config=point_cloud_encoder_config
+        )
+        
+        # 融合层
+        self.fusion_layer = nn.Linear(fusion_dim, fusion_dim)
+        
+        print(f"DualModalEncoder: RGB({fusion_dim//2}) + PointCloud({fusion_dim//2}) -> {fusion_dim}")
+        
+    def forward(self, rgb_images, point_cloud_data):
+        """
+        处理RGB图像和点云数据
+        
+        Args:
+            rgb_images: Tensor - RGB图像 [B, 3, H, W]
+            point_cloud_data: Dict - 点云数据字典，包含coord, grid_coord, offset, feat等字段
+            
+        Returns:
+            fused_features: List[Tensor] - 融合后的特征列表
+            original_indices: List[Tensor] - 原始索引列表
+            pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
+        """
+        # 处理RGB图像（获取2D特征以便像素索引映射）
+        rgb_2d = self.image_encoder(rgb_images, return_2d_features=True)  # [B, C, Hf, Wf]
+        B, C, Hf, Wf = rgb_2d.shape
+        # 同时保留展平后的序列表示用于索引收集
+        rgb_seq = rgb_2d.permute(0, 2, 3, 1).contiguous().view(B, Hf * Wf, C)  # [B, Hf*Wf, C]
+
+        # 处理点云数据
+        pc_features, original_indices, pixel_coords_out = self.point_cloud_encoder(point_cloud_data)  # List[Tensor]
+
+        # 融合特征 - 基于pc feature对应的像素集合，聚合RGB后与PC拼接
+        fused_pc_features = []  # List[Tensor] with shape [N_feat_i, fusion_dim]
+        H_img, W_img = rgb_images.shape[-2], rgb_images.shape[-1]
+
+        for i, pc_feat in enumerate(pc_features):
+            # pc_feat: [N_feat_i, output_dim] - 第i个样本的PC features（PointTransformerV3的输出）
+            # original_indices[i]: [N_feat_i] - 每个PC feature对应的原始点索引
+            
+            # 当前样本的RGB特征
+            rgb_feat_seq = rgb_seq[i]  # [Hf*Wf, C]
+
+            # 当前样本的像素坐标（所有原始点的像素坐标）
+            pixel_coords_i = pixel_coords_out[i]  # [N_points, 2]
+
+            # 计算像素在特征图上的索引
+            if pixel_coords_i is None or pixel_coords_i.numel() == 0:
+                raise ValueError(f"Sample {i}: pixel_coords is None or empty. This indicates a data pipeline issue.")
+            
+            x_pix = pixel_coords_i[:, 0].to(pc_feat.device).float()  # [N_points]
+            y_pix = pixel_coords_i[:, 1].to(pc_feat.device).float()  # [N_points]
+            # 将原图像素坐标映射到特征图坐标
+            x_feat = (x_pix * (Wf / float(W_img))).floor().clamp(0, Wf - 1).long()
+            y_feat = (y_pix * (Hf / float(H_img))).floor().clamp(0, Hf - 1).long()
+            feat_idx = y_feat * Wf + x_feat  # [N_points] - 在特征图中的线性索引
+
+            # 获取所有原始点的RGB特征
+            all_rgb_feat = rgb_feat_seq[feat_idx]  # [N_points, C_rgb]
+
+            # 对每个PC feature，聚合其对应的所有原始点的RGB特征
+            orig_idx_i = original_indices[i]  # [N_feat_i] - 每个PC feature对应的原始点索引
+            
+            # 按PC feature索引分组，聚合RGB特征
+            unique_feat, inv = torch.unique(orig_idx_i, sorted=True, return_inverse=True)
+            num_feats = unique_feat.shape[0]
+            
+            # 聚合RGB特征：对属于同一PC feature的所有原始点的RGB特征取平均
+            rgb_sum = torch.zeros(num_feats, all_rgb_feat.shape[-1], device=all_rgb_feat.device, dtype=all_rgb_feat.dtype)
+            rgb_sum.index_add_(0, inv, all_rgb_feat)
+            counts = torch.bincount(inv, minlength=num_feats).unsqueeze(-1)
+            rgb_avg = rgb_sum / counts  # [N_feat_i, C_rgb]
+
+            # 拼接PC features与聚合的RGB特征
+            combined = torch.cat([pc_feat, rgb_avg], dim=-1)  # [N_feat_i, output_dim + C_rgb]
+            fused_feat = self.fusion_layer(combined)  # [N_feat_i, fusion_dim]
+            fused_pc_features.append(fused_feat)
+
+        return fused_pc_features, original_indices, pixel_coords_out
+    
+    def get_feature_pixel_mapping(self, fused_features, original_indices, pixel_coords_out):
+        """
+        建立融合特征和原图像素的对应关系
+        
+        Args:
+            fused_features: List[Tensor] - 融合特征列表，每个元素是[H*W, fusion_dim]
+            original_indices: List[Tensor] - 原始索引列表，每个元素是[N_i]，表示每个点对应哪个feature
+            pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
+            
+        Returns:
+            mapping: List[Dict] - 每个样本的对应关系字典列表
+                    每个字典的key是feature索引，value是包含该feature的所有点的信息
+                    格式: {feature_idx: {'fused_feature': Tensor, 'points': List[Dict]}}
+        """
+        mapping = []
+        
+        for i in range(len(fused_features)):
+            fused_feat_i = fused_features[i]       # [H*W, fusion_dim]
+            orig_idx_i = original_indices[i]       # [N_i]
+            pixel_coord_i = pixel_coords_out[i]    # [N_i, 2]
+            
+            # 按feature索引分组
+            feature_groups = {}
+            
+            for j in range(orig_idx_i.shape[0]):
+                feature_idx = orig_idx_i[j].item()
+                
+                if feature_idx not in feature_groups:
+                    feature_groups[feature_idx] = {
+                        'fused_feature': fused_feat_i[feature_idx],  # 这个feature的融合特征
+                        'points': []  # 属于这个feature的所有点
+                    }
+                
+                # 添加这个点的信息
+                feature_groups[feature_idx]['points'].append({
+                    'point_idx': j,  # 在原始点云中的索引
+                    'pixel_coord': pixel_coord_i[j],  # [2] - 像素坐标
+                })
+            
+            mapping.append(feature_groups)
+        
+        return mapping
+
 @dataclass
 class IncrementalState:
     """增量生成状态 - 参考PrimitiveAnything实现"""
     current_sequence: torch.Tensor  # [B, current_len, embed_dim]
-    image_embed: torch.Tensor      # [B, H*W, image_dim]  
-    image_cond: torch.Tensor       # [B, image_cond_dim]
+    fused_embed: torch.Tensor      # [B, H*W, fusion_dim] - 融合后的特征
+    fused_cond: torch.Tensor       # [B, fusion_cond_dim] - 融合后的条件
     stopped_samples: torch.Tensor  # [B] 布尔值，标记哪些样本已停止
     current_step: int              # 当前步数
     
@@ -413,11 +689,15 @@ class PrimitiveTransformer3D(nn.Module):
         attn_dropout = 0.0,  # 注意力dropout
         ff_dropout = 0.0,    # 前馈dropout
         
-        # 图像编码器 - 支持6通道RGBXYZ输入
+        # 双模态编码器配置
         image_encoder_dim = 512,
+        point_cloud_encoder_dim = 256,
+        fusion_dim = 512,
         use_fpn = True,
         backbone = "resnet50",
         pretrained = True,
+        image_encoder_config = None,
+        point_cloud_encoder_config = None,
         
         # 其他参数
         shape_cond_with_cat = False,
@@ -451,19 +731,19 @@ class PrimitiveTransformer3D(nn.Module):
         self.gateloop_depth = gateloop_depth
         self.gateloop_use_heinsen = gateloop_use_heinsen
         
-        # 图像条件投影层
+        # 融合特征条件投影层
         if shape_cond_with_cat:
-            self.image_cond_proj = nn.Linear(image_encoder_dim, dim)
+            self.image_cond_proj = nn.Linear(fusion_dim, dim)
         else:
             self.image_cond_proj = None
         
-        # 图像条件化层
+        # 融合特征条件化层
         if condition_on_image:
-            self.image_film_cond = FiLM(dim, dim)
-            self.image_cond_proj_film = nn.Linear(image_encoder_dim, self.image_film_cond.to_gamma.in_features)
+            self.fused_film_cond = FiLM(dim, dim)
+            self.fused_cond_proj_film = nn.Linear(fusion_dim, self.fused_film_cond.to_gamma.in_features)
         else:
-            self.image_film_cond = None
-            self.image_cond_proj_film = None
+            self.fused_film_cond = None
+            self.fused_cond_proj_film = None
         
         # 门控循环块
         if gateloop_depth > 0:
@@ -471,13 +751,25 @@ class PrimitiveTransformer3D(nn.Module):
         else:
             self.gateloop_block = None
         
-        # 图像编码器 - 修改为6通道RGBXYZ输入
-        self.image_encoder = ImageEncoder(
-            input_channels=6,  # 修改：RGB(3) + XYZ(3) = 6通道
-            output_dim=image_encoder_dim,
-            use_fpn=use_fpn,
-            backbone=backbone,
-            pretrained=pretrained
+        # 双模态编码器 - 分别处理RGB和点云数据
+        # 如果传入了完整的image_encoder_config，使用它；否则使用基本参数
+        if image_encoder_config is not None:
+            # 使用传入的完整配置，但确保output_dim正确
+            final_image_encoder_config = image_encoder_config.copy()
+            final_image_encoder_config['output_dim'] = fusion_dim // 2
+        else:
+            # 向后兼容：使用基本参数构建配置
+            final_image_encoder_config = {
+                'use_fpn': use_fpn,
+                'backbone': backbone,
+                'pretrained': pretrained,
+                'output_dim': fusion_dim // 2
+            }
+        
+        self.dual_modal_encoder = DualModalEncoder(
+            image_encoder_config=final_image_encoder_config,
+            point_cloud_encoder_config=point_cloud_encoder_config,
+            fusion_dim=fusion_dim
         )
         
         # 3D嵌入层
@@ -510,7 +802,7 @@ class PrimitiveTransformer3D(nn.Module):
             attn_dropout=attn_dropout,  # 使用注意力dropout
             ff_dropout=ff_dropout,      # 使用前馈dropout
             cross_attend=True,
-            cross_attn_dim_context=image_encoder_dim,
+            cross_attn_dim_context=fusion_dim,
         )
         
         # 3D预测头 - 添加z坐标和length
@@ -828,7 +1120,12 @@ class PrimitiveTransformer3D(nn.Module):
         w: Tensor,
         h: Tensor,
         l: Tensor,  # 新增length
-        image: Tensor,  # 现在是RGBXYZ，6通道
+        rgb_image: Tensor,  # RGB图像 [B, 3, H, W]
+        coords: List[Tensor],  # 坐标列表
+        grid_coords: List[Tensor],  # 网格坐标列表
+        offsets: List[Tensor],  # 偏移量列表
+        feats: List[Tensor],  # 特征列表
+        pixel_coords: List[Tensor] = None,  # 像素坐标列表，每个元素是[N_i, 2]
     ):
         """3D前向传播"""
         # 创建3D mask
@@ -837,18 +1134,28 @@ class PrimitiveTransformer3D(nn.Module):
         # 编码3D基本体
         codes, discrete_coords = self.encode_primitive(x, y, z, w, h, l, primitive_mask)
 
-        # 编码RGBXYZ图像
-        image_embed = self.image_encoder(image)  # [batch_size, H*W, image_encoder_dim]
+        # 构建点云数据字典
+        point_cloud_data = {
+            'coord': coords,
+            'grid_coord': grid_coords,
+            'offset': offsets,
+            'feat': feats,
+            'pixel_coords' = pixel_coords
+        }
+ 
+            
+        
+        # 使用双模态编码器处理RGB图像和点云数据
+        fused_embed, original_indices, pixel_coords_out = self.dual_modal_encoder(rgb_image, point_cloud_data)
+        
+        # 将融合特征转换为统一的格式
+        # 假设每个样本的融合特征形状为 [H*W, fusion_dim]
+        # fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, H*W, fusion_dim]
         
         # 添加位置编码
         batch_size, seq_len, _ = codes.shape
         device = codes.device
         
-        # 为图像特征添加2D位置编码
-        H = W = int(np.sqrt(image_embed.shape[1]))
-        pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-        pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-        image_embed = image_embed + pos_embed_2d
         
         # 构建输入序列
         history = codes
@@ -859,11 +1166,11 @@ class PrimitiveTransformer3D(nn.Module):
         pos_embed = self.pos_embed[:, :seq_len, :]
         primitive_codes = primitive_codes + pos_embed
         
-        # 图像条件化处理
-        if self.condition_on_image and self.image_film_cond is not None:
-            pooled_image_embed = image_embed.mean(dim=1)
-            image_cond = self.image_cond_proj_film(pooled_image_embed)
-            primitive_codes = self.image_film_cond(primitive_codes, image_cond)
+        # 融合特征条件化处理（RGB+点云融合特征）
+        if self.condition_on_image and self.fused_film_cond is not None:
+            pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+            fused_cond = self.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
+            primitive_codes = self.fused_film_cond(primitive_codes, fused_cond)  # FiLM调制
         
         # 门控循环块处理
         if self.gateloop_block is not None:
@@ -872,7 +1179,7 @@ class PrimitiveTransformer3D(nn.Module):
         # 变换器解码 - 禁用gradient checkpointing以避免与Scheduled Sampling冲突
         attended_codes = self.decoder(
             primitive_codes,
-            context=image_embed,
+            context=fused_embed,
         )
 
         return attended_codes
@@ -886,12 +1193,17 @@ class PrimitiveTransformer3D(nn.Module):
         w: Tensor,
         h: Tensor,
         l: Tensor,
-        image: Tensor
+        rgb_image: Tensor,
+        coords: List[Tensor],
+        grid_coords: List[Tensor],
+        offsets: List[Tensor],
+        feats: List[Tensor],
+        pixel_coords: List[Tensor] = None
     ):
         """带预测输出的前向传播，用于训练"""
         # 先调用标准前向传播获取attended_codes
         attended_codes = self.forward(
-            x=x, y=y, z=z, w=w, h=h, l=l, image=image
+            x=x, y=y, z=z, w=w, h=h, l=l, rgb_image=rgb_image, coords=coords, grid_coords=grid_coords, offsets=offsets, feats=feats, pixel_coords=pixel_coords
         )
         
         # attended_codes shape: [batch_size, seq_len, model_dim]
@@ -977,7 +1289,11 @@ class PrimitiveTransformer3D(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        image: Tensor,  # RGBXYZ 6通道输入
+        rgb_image: Tensor,  # RGB图像 [B, 3, H, W]
+        coords: List[Tensor],  # 坐标列表
+        grid_coords: List[Tensor],  # 网格坐标列表
+        offsets: List[Tensor],  # 偏移量列表
+        feats: List[Tensor],  # 特征列表
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5,
@@ -985,18 +1301,15 @@ class PrimitiveTransformer3D(nn.Module):
     ):
         """3D autoregressive生成"""
         max_seq_len = max_seq_len or self.max_seq_len
-        batch_size = image.shape[0]
-        device = image.device
+        batch_size = rgb_image.shape[0]
+        device = rgb_image.device
         
-        # 编码RGBXYZ图像
-        image_embed = self.image_encoder(image)
+        # 使用双模态编码器处理RGB图像和点云数据
+        fused_features, original_indices = self.dual_modal_encoder(rgb_image, coords, grid_coords, offsets, feats)
         
-        # 添加2D位置编码
-        H = W = int(np.sqrt(image_embed.shape[1]))
-        if H * W == image_embed.shape[1]:
-            pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-            pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-            image_embed = image_embed + pos_embed_2d
+        # 将融合特征转换为统一的格式
+        fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, H*W, fusion_dim]
+        
         
         # 为每个样本独立跟踪3D生成结果
         generated_results = {
@@ -1024,11 +1337,11 @@ class PrimitiveTransformer3D(nn.Module):
             pos_embed = self.pos_embed[:, :seq_len, :]
             primitive_codes = primitive_codes + pos_embed
             
-            # 图像条件化处理
-            if self.condition_on_image and self.image_film_cond is not None:
-                pooled_image_embed = image_embed.mean(dim=1)
-                image_cond = self.image_cond_proj_film(pooled_image_embed)
-                primitive_codes = self.image_film_cond(primitive_codes, image_cond)
+            # 融合特征条件化处理（RGB+点云融合特征）
+            if self.condition_on_image and self.fused_film_cond is not None:
+                pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+                fused_cond = self.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
+                primitive_codes = self.fused_film_cond(primitive_codes, fused_cond)  # FiLM调制
             
             # 门控循环块处理
             if self.gateloop_block is not None:
@@ -1037,7 +1350,7 @@ class PrimitiveTransformer3D(nn.Module):
             # 通过decoder获取attended codes
             attended_codes = self.decoder(
                 primitive_codes,
-                context=image_embed,
+                context=fused_embed,
             )
             
             # 用最后一个位置预测下一个token
@@ -1213,7 +1526,11 @@ class PrimitiveTransformer3D(nn.Module):
     
     def initialize_incremental_generation(
         self,
-        image: Tensor,
+        rgb_image: Tensor,
+        coords: List[Tensor],
+        grid_coords: List[Tensor],
+        offsets: List[Tensor],
+        feats: List[Tensor],
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5
@@ -1222,7 +1539,11 @@ class PrimitiveTransformer3D(nn.Module):
         初始化增量生成状态
         
         Args:
-            image: [B, 6, H, W] RGBXYZ输入图像
+            rgb_image: [B, 3, H, W] RGB输入图像
+            coords: List[Tensor] 坐标列表
+            grid_coords: List[Tensor] 网格坐标列表
+            offsets: List[Tensor] 偏移量列表
+            feats: List[Tensor] 特征列表
             max_seq_len: 最大序列长度
             temperature: 采样温度
             eos_threshold: EOS阈值
@@ -1230,26 +1551,23 @@ class PrimitiveTransformer3D(nn.Module):
         Returns:
             state: 初始化的增量状态
         """
-        batch_size = image.shape[0]
+        batch_size = rgb_image.shape[0]
         max_seq_len = max_seq_len or self.max_seq_len
-        device = image.device
+        device = rgb_image.device
         
-        # 1. 编码图像（只计算一次）
+        # 1. 使用双模态编码器处理RGB图像和点云数据（只计算一次）
         with torch.no_grad():
-            image_embed = self.image_encoder(image)
+            fused_features, original_indices = self.dual_modal_encoder(rgb_image, coords, grid_coords, offsets, feats)
             
-            # 添加2D位置编码
-            H = W = int(np.sqrt(image_embed.shape[1]))
-            if H * W == image_embed.shape[1]:
-                pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-                pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-                image_embed = image_embed + pos_embed_2d
+            # 将融合特征转换为统一的格式
+            fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, H*W, fusion_dim]
             
-            # 准备图像条件化
-            image_cond = None
-            if self.condition_on_image and self.image_film_cond is not None:
-                pooled_image_embed = image_embed.mean(dim=1)
-                image_cond = self.image_cond_proj_film(pooled_image_embed)
+            
+            # 准备融合特征条件化（RGB+点云融合特征）
+            fused_cond = None
+            if self.condition_on_image and self.fused_film_cond is not None:
+                pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+                fused_cond = self.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
         
         # 2. 初始化序列状态
         current_sequence = repeat(self.sos_token, 'n d -> b n d', b=batch_size)
@@ -1269,8 +1587,8 @@ class PrimitiveTransformer3D(nn.Module):
         # 4. 创建状态对象
         state = IncrementalState(
             current_sequence=current_sequence,
-            image_embed=image_embed,
-            image_cond=image_cond,
+            fused_embed=fused_embed,
+            fused_cond=fused_cond,
             stopped_samples=stopped_samples,
             current_step=0,
             decoder_cache=None,
@@ -1314,9 +1632,9 @@ class PrimitiveTransformer3D(nn.Module):
             pos_embed = self.pos_embed[:, :current_len, :]
             primitive_codes = primitive_codes + pos_embed
             
-            # 图像条件化
-            if state.image_cond is not None:
-                primitive_codes = self.image_film_cond(primitive_codes, state.image_cond)
+            # 融合特征条件化（RGB+点云）
+            if state.fused_cond is not None:
+                primitive_codes = self.fused_film_cond(primitive_codes, state.fused_cond)
             
             # 门控循环块（如果存在）
             if self.gateloop_block is not None:
@@ -1326,7 +1644,7 @@ class PrimitiveTransformer3D(nn.Module):
             # Transformer解码（初始化decoder缓存）
             attended_codes, decoder_cache = self.decoder(
                 primitive_codes,
-                context=state.image_embed,
+                context=state.fused_embed,
                 cache=None,  # 第一次调用，无缓存
                 return_hiddens=True  # 返回中间状态用于缓存
             )
@@ -1349,9 +1667,9 @@ class PrimitiveTransformer3D(nn.Module):
             pos_embed = self.pos_embed[:, pos_index:pos_index+1, :]
             primitive_codes = new_token + pos_embed
             
-            # 图像条件化（只对新token）
-            if state.image_cond is not None:
-                primitive_codes = self.image_film_cond(primitive_codes, state.image_cond)
+            # 融合特征条件化（RGB+点云，只对新token）
+            if state.fused_cond is not None:
+                primitive_codes = self.fused_film_cond(primitive_codes, state.fused_cond)
             
             # 门控循环块增量计算
             if self.gateloop_block is not None:
@@ -1364,7 +1682,7 @@ class PrimitiveTransformer3D(nn.Module):
             # 真正的增量Transformer解码！
             attended_codes, new_decoder_cache = self.decoder(
                 primitive_codes,  # 只有新token [B, 1, dim]
-                context=state.image_embed,
+                context=state.fused_embed,
                 cache=state.decoder_cache,  # 使用之前的decoder缓存
                 return_hiddens=True
             )
@@ -1379,7 +1697,7 @@ class PrimitiveTransformer3D(nn.Module):
             print(f"   current_step: {state.current_step}")
             print(f"   current_sequence shape: {state.current_sequence.shape}")
             print(f"   primitive_codes shape: {primitive_codes.shape}")
-            print(f"   image_embed shape: {state.image_embed.shape}")
+            print(f"   fused_embed shape: {state.fused_embed.shape}")
             if state.current_step == 0:
                 print("   This is step 0 (initialization)")
             else:
@@ -1517,7 +1835,11 @@ class PrimitiveTransformer3D(nn.Module):
     @torch.no_grad()
     def generate_incremental(
         self,
-        image: Tensor,
+        rgb_image: Tensor,
+        coords: List[Tensor],
+        grid_coords: List[Tensor],
+        offsets: List[Tensor],
+        feats: List[Tensor],
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5,
@@ -1527,7 +1849,11 @@ class PrimitiveTransformer3D(nn.Module):
         完整的增量生成流程
         
         Args:
-            image: [B, 6, H, W] RGBXYZ输入图像
+            rgb_image: [B, 3, H, W] RGB输入图像
+            coords: List[Tensor] 坐标列表
+            grid_coords: List[Tensor] 网格坐标列表
+            offsets: List[Tensor] 偏移量列表
+            feats: List[Tensor] 特征列表
             max_seq_len: 最大序列长度
             temperature: 采样温度
             eos_threshold: EOS阈值
@@ -1536,12 +1862,12 @@ class PrimitiveTransformer3D(nn.Module):
         Returns:
             results: 生成的完整序列
         """
-        batch_size = image.shape[0]
+        batch_size = rgb_image.shape[0]
         max_seq_len = max_seq_len or self.max_seq_len
-        device = image.device
+        device = rgb_image.device
         
         # 初始化生成状态
-        state = self.initialize_incremental_generation(image, max_seq_len, temperature, eos_threshold)
+        state = self.initialize_incremental_generation(rgb_image, coords, grid_coords, offsets, feats, max_seq_len, temperature, eos_threshold)
         
         # 逐步生成
         for step in range(max_seq_len):

@@ -98,35 +98,79 @@ training:
 # 模型配置 - 网络架构（增强正则化）
 # =============================================================================
 model:
-  name: "PrimitiveTransformer3DComplex"
-  version: "2.0"
+  name: "PrimitiveTransformer3DDualModal"
+  version: "3.0"
   
-  # 输入配置
+  # 输入配置 - 双模态
   input:
-    channels: 6  # RGBXYZ
+    rgb_channels: 3  # RGB图像
+    point_cloud_channels: 3  # XYZ点云
   
-  # 图像编码器 - 增强正则化
-  image_encoder:
-    backbone: "resnet50"
-    pretrained: true
-    use_fpn: true
-    fpn_output_channels: 128
-    output_dim: 256
+  # 双模态编码器配置
+  dual_modal_encoder:
+    # RGB图像编码器
+    image_encoder:
+      backbone: "resnet18"
+      pretrained: true
+      use_fpn: true
+      fpn_output_channels: 128
+      output_dim: 256  # 双模态中RGB分支输出维度
     
-    # FPN详细配置
-    fpn:
-      attention_layers: [2, 3]
-      attention_heads: 8
-      smooth_conv_kernel: 3
-      smooth_conv_padding: 1
+      # FPN详细配置
+      fpn:
+        attention_layers: [2, 3]
+        attention_heads: 8
+        smooth_conv_kernel: 3
+        smooth_conv_padding: 1
     
-    # ResNet Conv1配置
-    conv1:
-      out_channels: 64
-      kernel_size: 7
-      stride: 2
-      padding: 3
-      bias: false
+      # ResNet Conv1配置
+      conv1:
+        out_channels: 64
+        kernel_size: 7
+        stride: 2
+        padding: 3
+        bias: false
+    
+    # 点云编码器
+    point_cloud_encoder:
+      type: "PointTransformerV3"
+      output_dim: 256  # 点云分支输出维度
+      config:
+        # 基础参数
+        in_channels: 3  # XYZ数据
+        num_classes: 128  # 输出类别数（会被output_dim覆盖）
+        backbone_out_channels: 64
+        
+        # 数据顺序和步长
+        order: ["z", "z-trans"]  # 数据顺序
+        stride: [2, 2, 2, 2]  # 各阶段步长
+        
+        # 编码器配置
+        enc_depths: [2, 2, 2, 6, 2]  # 编码器各阶段深度
+        enc_channels: [32, 64, 128, 256, 512]  # 编码器各阶段通道数
+        enc_num_head: [2, 4, 8, 16, 32]  # 编码器各阶段注意力头数
+        enc_patch_size: [48, 48, 48, 48, 48]  # 编码器各阶段patch大小
+        
+        # 解码器配置
+        dec_depths: [2, 2, 2, 2]  # 解码器各阶段深度
+        dec_channels: [64, 64, 128, 256]  # 解码器各阶段通道数
+        dec_num_head: [4, 4, 8, 16]  # 解码器各阶段注意力头数
+        dec_patch_size: [48, 48, 48, 48]  # 解码器各阶段patch大小
+        
+        # 注意力机制配置
+        mlp_ratio: 4  # MLP扩展比例
+        qkv_bias: true  # QKV投影是否使用偏置
+        qk_scale: null  # QK缩放因子
+        attn_drop: 0.0  # 注意力dropout
+        proj_drop: 0.0  # 投影dropout
+        drop_path: 0.1  # 路径dropout
+        
+        # 其他配置
+        pre_norm: true  # 是否使用预归一化
+        shuffle_orders: true  # 是否打乱数据顺序
+        enable_rpe: true  # 是否启用相对位置编码
+        traceable: true  # 是否可追踪
+    
   
   # Transformer架构 - 增强正则化（实际生效的参数）
   transformer:
@@ -157,10 +201,10 @@ model:
     dim_h_embed: 64
     dim_l_embed: 64
   
-  # 条件化配置
+  # 条件化配置 - 双模态
   conditioning:
     condition_on_image: true
-    image_film_cond: true
+    fused_film_cond: true  # 使用融合特征进行FiLM条件化
     # use_self_cond: false
     # self_cond_prob: 0.5
   
@@ -173,17 +217,6 @@ model:
     gateloop:
       depth: 2
     
-    # 位置编码配置
-    positional_encoding:
-      # 2D位置编码 (用于图像特征)
-      pos_2d:
-        base: 10000
-        dim_divisor: 4
-      
-      # 1D位置编码 (用于序列) 
-      pos_1d:
-        max_seq_len: 1000
-        learnable: false
 
 # =============================================================================
 # 数据配置 - 数据加载和增强（大幅增强）
@@ -195,23 +228,41 @@ data:
     
   # 3D坐标和尺寸范围
   continuous_ranges:
-    x: [0.5, 2.5]
+    x: [0.2, 3.0]
     y: [-2.0, 2.0] 
-    z: [-1.5, 1.5]
+    z: [-1.5, 0.5]
     w: [0.3, 0.7]
     h: [0.3, 0.7]
     l: [0.3, 0.7]
   
   # DataLoader设置
   dataloader:
-    batch_size: 4
-    num_workers: 4
+    batch_size: 1
+    num_workers: 1
     pin_memory: true
     prefetch_factor: 2
     persistent_workers: true
     shuffle: true
     drop_last: true
   
+  # 点云数据处理配置
+  point_cloud:
+    
+    # 点云裁剪配置
+    cropping:
+      random_fluctuation: 0.1  # 随机波动范围（米）
+      max_points: 200000  # 最大点数
+    
+    # 点云变换配置
+    transformations:
+      grid_sample:
+        enabled: true
+        grid_size: 0.02  # 网格大小
+      random_dropout:
+        enabled: true
+        probability: 0.5
+        dropout_ratio: 0.3
+
   # 数据增强 - 大幅增强泛化性
   augmentation:
     enabled: true
@@ -359,8 +410,8 @@ loss:
 # 实验配置 - 日志和保存
 # =============================================================================
 experiment:
-  name: "primitive_3d_corner_aug"
-  description: "泛化性优化的3D物体检测实验"
+  name: "primitive_3d_dual_modal"
+  description: "双模态3D物体检测实验（RGB图像+点云）"
   
   # 检查点配置
   checkpoints:

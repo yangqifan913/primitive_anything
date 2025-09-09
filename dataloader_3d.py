@@ -13,11 +13,195 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 import random
+from collections.abc import Sequence, Mapping
 
 def load_config(config_path: str = "data_config.yaml") -> Dict:
     """加载数据配置文件 - 已废弃，保留以防兼容性问题"""
     print(f"⚠️  警告: load_config已废弃，现在使用统一配置文件training_config.yaml")
     return {}
+
+# 从segment_dataset.py复制的变换类
+class GridSample(object):
+    def __init__(self, grid_size=0.05, mode="train"):
+        self.grid_size = grid_size
+        self.hash = self.fnv_hash_vec
+        if mode == "train":
+            self.keys=("coord",)
+        elif mode == "test":
+            self.keys=("coord",)
+
+    def __call__(self, data_dict):
+        assert "coord" in data_dict.keys()
+        scaled_coord = data_dict["coord"] / np.array(self.grid_size)
+        grid_coord = np.floor(scaled_coord).astype(int)
+        min_coord = grid_coord.min(0)
+        grid_coord -= min_coord
+        scaled_coord -= min_coord
+        min_coord = min_coord * np.array(self.grid_size)
+        key = self.hash(grid_coord)
+        idx_sort = np.argsort(key)
+        key_sort = key[idx_sort]
+        _, inverse, count = np.unique(key_sort, return_inverse=True, return_counts=True)
+        idx_select = (
+            np.cumsum(np.insert(count, 0, 0)[0:-1])
+            + np.random.randint(0, count.max(), count.size) % count
+        )
+        idx_unique = idx_sort[idx_select]
+        data_dict["grid_coord"] = grid_coord[idx_unique]
+        for key in self.keys:
+            data_dict[key] = data_dict[key][idx_unique]
+        
+        # 保持像素坐标映射关系
+        if "pixel_coords" in data_dict:
+            data_dict["pixel_coords"] = data_dict["pixel_coords"][idx_unique]
+        
+        return data_dict
+    
+    @staticmethod
+    def fnv_hash_vec(arr):
+        assert arr.ndim == 2
+        arr = arr.copy()
+        arr = arr.astype(np.uint64, copy=False)
+        hashed_arr = np.uint64(14695981039346656037) * np.ones(
+            arr.shape[0], dtype=np.uint64
+        )
+        for j in range(arr.shape[1]):
+            hashed_arr *= np.uint64(1099511628211)
+            hashed_arr = np.bitwise_xor(hashed_arr, arr[:, j])
+        return hashed_arr
+
+class ToTensor(object):
+    def __call__(self, data):
+        if isinstance(data, torch.Tensor):
+            return data
+        elif isinstance(data, str):
+            return data
+        elif isinstance(data, int):
+            return torch.LongTensor([data])
+        elif isinstance(data, float):
+            return torch.FloatTensor([data])
+        elif isinstance(data, np.ndarray) and np.issubdtype(data.dtype, bool):
+            return torch.from_numpy(data)
+        elif isinstance(data, np.ndarray) and np.issubdtype(data.dtype, np.integer):
+            return torch.from_numpy(data).long()
+        elif isinstance(data, np.ndarray) and np.issubdtype(data.dtype, np.floating):
+            return torch.from_numpy(data).float()
+        elif isinstance(data, Mapping):
+            result = {sub_key: self(item) for sub_key, item in data.items()}
+            return result
+        elif isinstance(data, Sequence):
+            result = [self(item) for item in data]
+            return result
+        else:
+            raise TypeError(f"type {type(data)} cannot be converted to tensor.")
+
+class Collect(object):
+    def __init__(self, keys, offset_keys_dict=None, **kwargs):
+        if offset_keys_dict is None:
+            offset_keys_dict = dict(offset="coord")
+        self.keys = keys
+        self.offset_keys = offset_keys_dict
+        self.kwargs = kwargs
+
+    def __call__(self, data_dict):
+        data = dict()
+        if isinstance(self.keys, str):
+            self.keys = [self.keys]
+        for key in self.keys:
+            data[key] = data_dict[key]
+        for key, value in self.offset_keys.items():
+            data[key] = torch.tensor([data_dict[value].shape[0]])
+        for name, keys in self.kwargs.items():
+            name = name.replace("_keys", "")
+            assert isinstance(keys, Sequence)
+            if len(keys) > 3: 
+                keys = [keys]
+            data[name] = torch.cat([data_dict[key].float() for key in keys], dim=1)
+        
+        # 保持像素坐标映射关系
+        if "pixel_coords" in data_dict:
+            data["pixel_coords"] = data_dict["pixel_coords"]
+        
+        return data
+
+class RandomCrop(object):
+    def __init__(self, point_max=80000, continuous_ranges=None, random_fluctuation=0.1):
+        self.point_max = point_max
+        self.continuous_ranges = continuous_ranges or {
+            'x': [0.5, 2.5],
+            'y': [-2.0, 2.0], 
+            'z': [-1.5, 1.5]
+        }
+        self.random_fluctuation = random_fluctuation  # 0.1m的随机波动
+
+    def __call__(self, data_dict):
+        point_max = self.point_max
+        assert "coord" in data_dict.keys()
+        
+        # 如果点云数量超过限制，进行基于范围的切割
+        if data_dict["coord"].shape[0] > point_max:
+            # 生成带随机波动的切割范围
+            crop_ranges = {}
+            for axis, (min_val, max_val) in self.continuous_ranges.items():
+                # 添加0.1m的随机波动
+                fluctuation = np.random.uniform(-self.random_fluctuation, self.random_fluctuation)
+                min_crop = min_val + fluctuation
+                max_crop = max_val + fluctuation
+                
+                # 确保范围仍然合理
+                min_crop = max(min_crop, min_val - self.random_fluctuation)
+                max_crop = min(max_crop, max_val + self.random_fluctuation)
+                
+                crop_ranges[axis] = [min_crop, max_crop]
+            
+            # 根据切割范围过滤点云
+            coord = data_dict["coord"]
+            valid_mask = np.ones(coord.shape[0], dtype=bool)
+            
+            # 对每个轴进行范围过滤
+            for i, axis in enumerate(['x', 'y', 'z']):
+                if axis in crop_ranges:
+                    min_val, max_val = crop_ranges[axis]
+                    axis_mask = (coord[:, i] >= min_val) & (coord[:, i] <= max_val)
+                    valid_mask = valid_mask & axis_mask
+            
+            # 如果过滤后的点云仍然太多，随机采样
+            if valid_mask.sum() > point_max:
+                valid_indices = np.where(valid_mask)[0]
+                selected_indices = np.random.choice(valid_indices, point_max, replace=False)
+                idx_crop = selected_indices
+            else:
+                # 如果过滤后的点云不够，使用所有有效点
+                idx_crop = np.where(valid_mask)[0]
+            
+            # 应用切割
+            if "coord" in data_dict.keys():
+                data_dict["coord"] = data_dict["coord"][idx_crop]
+            if "grid_coord" in data_dict.keys():
+                data_dict["grid_coord"] = data_dict["grid_coord"][idx_crop]
+            
+            # 保持像素坐标映射关系
+            if "pixel_coords" in data_dict:
+                data_dict["pixel_coords"] = data_dict["pixel_coords"][idx_crop]
+                
+        return data_dict
+
+class RandomDropout(object):
+    def __init__(self, dropout_ratio=0.2, dropout_application_ratio=0.5):
+        self.dropout_ratio = dropout_ratio
+        self.dropout_application_ratio = dropout_application_ratio
+
+    def __call__(self, data_dict):
+        if random.random() < self.dropout_application_ratio:
+            n = len(data_dict["coord"])
+            idx = np.random.choice(n, int(n * (1 - self.dropout_ratio)), replace=False)
+            if "coord" in data_dict.keys():
+                data_dict["coord"] = data_dict["coord"][idx]
+            
+            # 保持像素坐标映射关系
+            if "pixel_coords" in data_dict:
+                data_dict["pixel_coords"] = data_dict["pixel_coords"][idx]
+        return data_dict
 
 class Box3DDataset(Dataset):
     """3D Box检测数据集"""
@@ -95,6 +279,28 @@ class Box3DDataset(Dataset):
             print(f"🎨 数据增强已启用 (强度: {self.augment_intensity})")
         else:
             print(f"❌ 数据增强已禁用")
+        
+        # 点云变换，参考segment_dataset.py
+        self.grid = GridSample(grid_size=0.05, mode=stage)
+        self.totensor = ToTensor()
+        self.collect = Collect(keys=("coord", "grid_coord"), feat_keys=("coord",))
+        
+        # 使用continuous_ranges进行点云切割
+        # 从augmentation_config中获取裁剪参数
+        cropping_config = self.augmentation_config.get('point_cloud', {}).get('cropping', {})
+        point_max = cropping_config.get('max_points', 50000)
+        random_fluctuation = cropping_config.get('random_fluctuation', 0.1)
+        
+        self.crop = RandomCrop(
+            point_max=point_max,
+            continuous_ranges={
+                'x': self.continuous_range_x,
+                'y': self.continuous_range_y,
+                'z': self.continuous_range_z
+            },
+            random_fluctuation=random_fluctuation
+        )
+        self.drop = RandomDropout(dropout_ratio=0.3)
         
         # 扫描数据文件
         self.samples = self._scan_data()
@@ -427,6 +633,34 @@ class Box3DDataset(Dataset):
         
         return rgbxyz, boxes
     
+    def _convert_xyz_to_point_cloud(self, xyz_data: np.ndarray) -> dict:
+        """将XYZ数据转换为点云格式，并保持像素坐标映射关系"""
+        H, W, _ = xyz_data.shape
+        
+        # 创建像素坐标网格
+        pixel_y, pixel_x = np.meshgrid(np.arange(H), np.arange(W), indexing='ij')
+        pixel_coords = np.stack([
+            pixel_x.flatten(),  # X像素坐标
+            pixel_y.flatten()   # Y像素坐标
+        ], axis=1)  # (H*W, 2) - 像素坐标
+        
+        # 展平并组合坐标 - 使用PointTransformer期望的格式
+        coord = np.stack([
+            xyz_data[:, :, 0].flatten(),  # X坐标（来自XYZ数据）
+            xyz_data[:, :, 1].flatten(),  # Y坐标（来自XYZ数据）
+            xyz_data[:, :, 2].flatten()   # Z坐标（来自XYZ数据）
+        ], axis=1)  # (H*W, 3) - 这是PointTransformer期望的coord格式
+        
+        # 返回data_dict格式，参考segment_dataset.py
+        data_dict = {
+            'coord': coord,  # (N, 3) - XYZ坐标
+            'pixel_coords': pixel_coords,  # (N, 2) - 对应的像素坐标 [x, y]
+            'name': 'point_cloud'  # 可选的名字
+        }
+        
+        return data_dict
+    
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """获取单个样本"""
         sample = self.samples[idx]
@@ -446,22 +680,33 @@ class Box3DDataset(Dataset):
         # Pad序列到固定长度
         x_padded, y_padded, z_padded, w_padded, h_padded, l_padded, rotations_padded = self._pad_sequences(x, y, z, w, h, l, rotations)
         
-        # 转换图像格式：(H, W, 6) -> (6, H, W)
-        rgbxyz_tensor = torch.from_numpy(rgbxyz).permute(2, 0, 1).float()
+        # 分离RGB和点云数据
+        rgb_image = rgbxyz[:, :, :3]  # (H, W, 3) - RGB通道
+        xyz_data = rgbxyz[:, :, 3:6]  # (H, W, 3) - XYZ通道
         
-        # 归一化RGB通道到[0,1]
-        rgbxyz_tensor[:3] = rgbxyz_tensor[:3] / 255.0
+        # 转换RGB图像格式：(H, W, 3) -> (3, H, W)
+        rgb_tensor = torch.from_numpy(rgb_image).permute(2, 0, 1).float()
+        rgb_tensor = rgb_tensor / 255.0  # 归一化RGB通道到[0,1]
         
-        # 🔧 修复：不归一化XYZ点云通道，保持原始数值
-        # 只进行范围裁剪，确保在有效范围内
-        rgbxyz_tensor[3] = torch.clamp(rgbxyz_tensor[3], self.continuous_range_x[0], self.continuous_range_x[1])  # X
-        rgbxyz_tensor[4] = torch.clamp(rgbxyz_tensor[4], self.continuous_range_y[0], self.continuous_range_y[1])  # Y  
-        rgbxyz_tensor[5] = torch.clamp(rgbxyz_tensor[5], self.continuous_range_z[0], self.continuous_range_z[1])  # Z
+        # 处理点云数据：将(H, W, 3)转换为点云格式
+        point_cloud_dict = self._convert_xyz_to_point_cloud(xyz_data)
         
-        return {
-            'image': rgbxyz_tensor,  # (6, H, W) - RGBXYZ
-            'x': x_padded,          # (max_boxes,)
-            'y': y_padded,          # (max_boxes,)
+        # 应用点云变换，参考segment_dataset.py的流程
+        if self.stage == "train":
+            point_cloud_dict = self.drop(point_cloud_dict)
+        point_cloud_dict = self.grid(point_cloud_dict)
+        point_cloud_dict = self.crop(point_cloud_dict)
+        point_cloud_dict = self.totensor(point_cloud_dict)
+        point_cloud_dict = self.collect(point_cloud_dict)
+        
+        # 提取处理后的点云数据
+        # point_cloud = point_cloud_dict['coord']  # (N, 3) - XYZ坐标
+        
+        # 合并RGB图像和点云数据，参考segment_dataset.py的格式
+        result = {
+            'rgb_image': rgb_tensor,    # (3, H, W) - RGB图像
+            'x': x_padded,             # (max_boxes,)
+            'y': y_padded,             # (max_boxes,)
             'z': z_padded,          # (max_boxes,)
             'w': w_padded,          # (max_boxes,)
             'h': h_padded,          # (max_boxes,)
@@ -469,6 +714,11 @@ class Box3DDataset(Dataset):
             'rotations': rotations_padded,  # (max_boxes, 4) - 四元数旋转
             'folder_name': sample['folder_name']  # 用于调试
         }
+        
+        # 添加点云数据字段到结果中
+        result.update(point_cloud_dict)
+        
+        return result
 
 def create_dataloader(
     data_root: str,
@@ -515,10 +765,42 @@ def create_dataloader(
         pin_memory=pin_memory,
         drop_last=drop_last,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
-        persistent_workers=persistent_workers if num_workers > 0 else False
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        collate_fn=collate_fn  # 使用自定义collate函数
     )
     
     return dataloader
+
+def collate_fn(batch):
+    """自定义collate函数，与segment_dataset.py保持一致"""
+    # 使用默认的PyTorch collate行为，但处理变长点云数据
+    # 固定大小的张量会被自动stack，变长的保持为列表
+    
+    # 分离固定大小和变长的数据
+    fixed_size_data = {}
+    variable_size_data = {}
+    
+    # 固定大小的字段（会被stack）
+    fixed_fields = ['rgb_image', 'x', 'y', 'z', 'w', 'h', 'l', 'rotations']
+    # 变长的字段（保持为列表）
+    variable_fields = ['coord', 'grid_coord', 'offset', 'feat', 'pixel_coords', 'folder_name']
+    
+    for field in fixed_fields:
+        if field in batch[0]:
+            fixed_size_data[field] = [sample[field] for sample in batch]
+    
+    for field in variable_fields:
+        if field in batch[0]:
+            variable_size_data[field] = [sample[field] for sample in batch]
+    
+    # 堆叠固定大小的张量
+    for field, data_list in fixed_size_data.items():
+        fixed_size_data[field] = torch.stack(data_list, dim=0)
+    
+    # 合并结果
+    result = {**fixed_size_data, **variable_size_data}
+    
+    return result
 
 # 测试代码 - 已更新为使用统一配置
 if __name__ == "__main__":

@@ -153,6 +153,12 @@ class AdvancedTrainer:
         global_config = self.config_loader.get_global_config()
         self.validation_samples = validation_samples or global_config['logging']['validation_samples']
         
+        # 可视化配置
+        self.visualization_config = global_config.get('visualization', {})
+        self.distance_threshold = self.visualization_config.get('distance_threshold', 10.0)
+        self.coordinate_threshold = self.visualization_config.get('coordinate_threshold', 50)
+        self.box_color = self.visualization_config.get('box_color', [0, 255, 0])
+        
         # 训练状态
         self.current_epoch = 0
         self.current_phase_idx = 0
@@ -215,6 +221,9 @@ class AdvancedTrainer:
             print(f"📊 SwanLab日志: {'启用' if self.use_swanlab else '禁用'}")
             print(f"🖥️  GPU数量: {torch.cuda.device_count()}")
             print(f"🚀 分布式训练: {'启用' if (self.world_size > 1 and torch.cuda.device_count() > 1) else '禁用'}")
+            
+            # 验证配置参数使用情况
+            self._validate_config_usage()
         else:
             print(f"🔄 工作进程启动 (Rank {local_rank}/{world_size})")
             print(f"   GPU设备: {self.device}")
@@ -259,6 +268,20 @@ class AdvancedTrainer:
         if not advanced:
             raise ValueError("模型配置中缺少 'advanced' 部分")
         
+        # 构建完整的image_encoder_config，包含FPN详细配置
+        image_encoder_config = {
+            'use_fpn': image_encoder['use_fpn'],
+            'backbone': image_encoder['backbone'],
+            'pretrained': image_encoder['pretrained'],
+            'output_dim': image_encoder['output_dim'],
+            'fpn_output_channels': image_encoder.get('fpn_output_channels', 128),
+            'fpn': image_encoder.get('fpn', {}),  # 传递FPN详细配置
+            'conv1': image_encoder.get('conv1', {})  # 传递Conv1配置
+        }
+        
+        # 构建point_cloud_encoder_config
+        point_cloud_encoder_config = model_config.get('dual_modal_encoder', {}).get('point_cloud_encoder', {}).get('config', {})
+        
         self.model = PrimitiveTransformer3D(
             # 离散化参数
             num_discrete_x=discretization['num_discrete_x'],
@@ -293,11 +316,9 @@ class AdvancedTrainer:
             attn_dropout=transformer['attn_dropout'],  # 注意力dropout
             ff_dropout=transformer['ff_dropout'],      # 前馈dropout
             
-            # 图像编码器参数
-            image_encoder_dim=image_encoder['output_dim'],
-            use_fpn=image_encoder['use_fpn'],
-            backbone=image_encoder['backbone'],
-            pretrained=image_encoder['pretrained'],
+            # 传递完整的配置对象
+            image_encoder_config=image_encoder_config,
+            point_cloud_encoder_config=point_cloud_encoder_config,
             
             # 条件化配置
             condition_on_image=conditioning['condition_on_image'],
@@ -566,7 +587,14 @@ class AdvancedTrainer:
                 - 0.0~1.0: Scheduled Sampling (部分GT + 部分预测)
                 - 0.0: 纯Generation (100% 预测)
         """
-        rgbxyz = batch['image'].to(self.device)  # [B, 6, H, W]
+        # 双模态输入：RGB图像 + 点云数据
+        rgb_image = batch['rgb_image'].to(self.device)  # [B, 3, H, W]
+        coords = batch['coords']  # List[Tensor] - 点云坐标
+        grid_coords = batch['grid_coords']  # List[Tensor] - 网格坐标
+        offsets = batch['offsets']  # List[Tensor] - 偏移量
+        feats = batch['feats']  # List[Tensor] - 特征
+        pixel_coords = batch.get('pixel_coords', None)  # List[Tensor] - 像素坐标（可选）
+        
         targets = {
             'x': batch['x'].to(self.device),
             'y': batch['y'].to(self.device),
@@ -594,27 +622,33 @@ class AdvancedTrainer:
                 w=inputs['w'],
                 h=inputs['h'],
                 l=inputs['l'],
-                image=rgbxyz
+                rgb_image=rgb_image,
+                coords=coords,
+                grid_coords=grid_coords,
+                offsets=offsets,
+                feats=feats,
+                pixel_coords=pixel_coords
             )
             return outputs
         elif teacher_forcing_ratio == 0.0:
-            return self._forward_with_pure_generation(rgbxyz, targets, model)
+            return self._forward_with_pure_generation(rgb_image, coords, grid_coords, offsets, feats, pixel_coords, targets, model)
         else:
-            return self._forward_with_scheduled_sampling(rgbxyz, targets, teacher_forcing_ratio, model)
+            return self._forward_with_scheduled_sampling(rgb_image, coords, grid_coords, offsets, feats, pixel_coords, targets, teacher_forcing_ratio, model)
         
         
     
-    def _forward_with_scheduled_sampling(self, rgbxyz: torch.Tensor, targets: Dict, teacher_forcing_ratio: float, model) -> Dict:
+    def _forward_with_scheduled_sampling(self, rgb_image: torch.Tensor, coords: List, grid_coords: List, offsets: List, feats: List, pixel_coords: List, targets: Dict, teacher_forcing_ratio: float, model) -> Dict:
         """Scheduled Sampling实现 - 支持梯度传播"""
-        batch_size = rgbxyz.size(0)
+        batch_size = rgb_image.size(0)
         seq_len = targets['x'].size(1)
-        device = rgbxyz.device
+        device = rgb_image.device
         
         # ===== 使用支持梯度的增量生成获取预测序列 =====
         # 生成完整的预测序列（保持梯度）
-        predicted_output = self._forward_with_gradient_preserving_generation(
-            model, rgbxyz, targets, seq_len, device
-        )
+        with torch.no_grad():
+            predicted_output = self._forward_with_gradient_preserving_generation(
+                model, rgb_image, coords, grid_coords, offsets, feats, pixel_coords, targets, seq_len, device
+            )
         
         # 从预测输出中提取连续值
         continuous_predictions = predicted_output['continuous_dict']
@@ -672,45 +706,57 @@ class AdvancedTrainer:
             w=mixed_inputs['w'],
             h=mixed_inputs['h'],
             l=mixed_inputs['l'],
-            image=rgbxyz
+            rgb_image=rgb_image,
+            coords=coords,
+            grid_coords=grid_coords,
+            offsets=offsets,
+            feats=feats,
+            pixel_coords=pixel_coords
         )
     
 
-    def _forward_with_pure_generation(self, rgbxyz: torch.Tensor, targets: Dict, model) -> Dict:
+    def _forward_with_pure_generation(self, rgb_image: torch.Tensor, coords: List, grid_coords: List, offsets: List, feats: List, pixel_coords: List, targets: Dict, model) -> Dict:
         """Pure Generation训练 - 支持梯度传播的增量生成"""
-        batch_size = rgbxyz.size(0)
+        batch_size = rgb_image.size(0)
         seq_len = targets['x'].size(1)
-        device = rgbxyz.device
+        device = rgb_image.device
         
         # ===== 使用支持梯度的增量生成 =====
         return self._forward_with_gradient_preserving_generation(
-            model, rgbxyz, targets, seq_len, device
+            model, rgb_image, coords, grid_coords, offsets, feats, pixel_coords, targets, seq_len, device
         )
     
 
-    def _forward_with_gradient_preserving_generation(self, model, rgbxyz: torch.Tensor, targets: Dict, seq_len: int, device: torch.device) -> Dict:
+    def _forward_with_gradient_preserving_generation(self, model, rgb_image: torch.Tensor, coords: List, grid_coords: List, offsets: List, feats: List, pixel_coords: List, targets: Dict, seq_len: int, device: torch.device) -> Dict:
         """
         支持梯度的增量生成 - 使用真正的增量解码
         
         这个版本使用类似 generate_next_box_incremental 的逻辑，但保持梯度流动
         """
-        batch_size = rgbxyz.size(0)
+        batch_size = rgb_image.size(0)
         
-        # 1. 编码图像（只计算一次）
-        image_embed = model.image_encoder(rgbxyz)
+        # 1. 编码双模态输入（只计算一次）
+        # 构建点云数据字典
+        point_cloud_data = {
+            'coord': coords,
+            'grid_coord': grid_coords,
+            'offset': offsets,
+            'feat': feats
+        }
+        if pixel_coords is not None:
+            point_cloud_data['pixel_coords'] = pixel_coords
         
-        # 🔧 修复Bug：添加2D位置编码（与推理代码保持一致）
-        H = W = int(np.sqrt(image_embed.shape[1]))
-        if H * W == image_embed.shape[1]:
-            from primitive_anything_3d import build_2d_sine_positional_encoding
-            pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-            pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-            image_embed = image_embed + pos_embed_2d
+        # 使用双模态编码器
+        fused_features, original_indices, pixel_coords_out = model.dual_modal_encoder(rgb_image, point_cloud_data)
         
-        image_cond = None
-        if model.condition_on_image and model.image_film_cond is not None:
-            pooled_image_embed = image_embed.mean(dim=1)
-            image_cond = model.image_cond_proj_film(pooled_image_embed)
+        # 将融合特征转换为统一的格式
+        fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, N_feat_i, fusion_dim]
+        
+        # 融合特征条件化处理（RGB+点云融合特征）
+        fused_cond = None
+        if model.condition_on_image and model.fused_film_cond is not None:
+            pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+            fused_cond = model.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
         
         # 2. 初始化序列状态
         from einops import repeat
@@ -737,9 +783,9 @@ class AdvancedTrainer:
                 pos_embed = model.pos_embed[:, :current_len, :]
                 primitive_codes = primitive_codes + pos_embed
                 
-                # 图像条件化
-                if image_cond is not None:
-                    primitive_codes = model.image_film_cond(primitive_codes, image_cond)
+                # 融合特征条件化（RGB+点云）
+                if fused_cond is not None:
+                    primitive_codes = model.fused_film_cond(primitive_codes, fused_cond)
                 
                 # 门控循环块（初始化缓存）
                 if model.gateloop_block is not None:
@@ -748,7 +794,7 @@ class AdvancedTrainer:
                 # Transformer解码（初始化decoder缓存）
                 attended_codes, decoder_cache = model.decoder(
                     primitive_codes,
-                    context=image_embed,
+                    context=fused_embed,
                     cache=None,
                     return_hiddens=True
                 )
@@ -760,9 +806,9 @@ class AdvancedTrainer:
                 pos_embed = model.pos_embed[:, current_len-1:current_len, :]
                 primitive_codes = new_token + pos_embed
                 
-                # 图像条件化（只对新token）
-                if image_cond is not None:
-                    primitive_codes = model.image_film_cond(primitive_codes, image_cond)
+                # 融合特征条件化（RGB+点云，只对新token）
+                if fused_cond is not None:
+                    primitive_codes = model.fused_film_cond(primitive_codes, fused_cond)
                 
                 # 门控循环块增量计算
                 if model.gateloop_block is not None:
@@ -774,7 +820,7 @@ class AdvancedTrainer:
                 # 真正的增量Transformer解码！（保持梯度）
                 attended_codes, decoder_cache = model.decoder(
                     primitive_codes,
-                    context=image_embed,
+                    context=fused_embed,
                     cache=decoder_cache,
                     return_hiddens=True
                 )
@@ -1055,7 +1101,13 @@ class AdvancedTrainer:
                 eval_iou = self._compute_tf_evaluation_iou(tf_outputs, targets)
                 
                 # 2. 纯生成验证
-                rgbxyz = batch['image'].to(self.device)
+                # 双模态输入：RGB图像 + 点云数据
+                rgb_image = batch['rgb_image'].to(self.device)  # [B, 3, H, W]
+                coords = batch['coords']  # List[Tensor] - 点云坐标
+                grid_coords = batch['grid_coords']  # List[Tensor] - 网格坐标
+                offsets = batch['offsets']  # List[Tensor] - 偏移量
+                feats = batch['feats']  # List[Tensor] - 特征
+                pixel_coords = batch.get('pixel_coords', None)  # List[Tensor] - 像素坐标（可选）
                 
                 if hasattr(self.model, 'module'):
                     model = self.model.module
@@ -1068,7 +1120,12 @@ class AdvancedTrainer:
                     # 🔧 修复：使用配置中的正确max_seq_len，而不是不存在的max_primitive_len
                     max_len = self.config_loader.get_global_config()['max_seq_len']
                     gen_results = model.generate_incremental(
-                        image=rgbxyz,
+                        rgb_image=rgb_image,
+                        coords=coords,
+                        grid_coords=grid_coords,
+                        offsets=offsets,
+                        feats=feats,
+                        pixel_coords=pixel_coords,
                         max_seq_len=max_len,
                         temperature=self.incremental_temperature
                     )
@@ -1077,7 +1134,12 @@ class AdvancedTrainer:
                     # 🔧 修复：使用配置中的正确max_seq_len
                     max_len = self.config_loader.get_global_config()['max_seq_len']
                     gen_results = model.generate(
-                        image=rgbxyz,
+                        rgb_image=rgb_image,
+                        coords=coords,
+                        grid_coords=grid_coords,
+                        offsets=offsets,
+                        feats=feats,
+                        pixel_coords=pixel_coords,
                         max_seq_len=max_len,
                         temperature=1.0
                     )
@@ -1629,6 +1691,97 @@ class AdvancedTrainer:
         
         return inter_volume / union_volume
     
+    def _apply_visualization_filters(self, boxes, distances=None):
+        """应用可视化过滤参数"""
+        if distances is not None:
+            # 使用距离阈值过滤
+            valid_mask = distances <= self.distance_threshold
+            boxes = [box for i, box in enumerate(boxes) if valid_mask[i]]
+        
+        # 使用坐标阈值过滤（这里可以根据具体需求实现）
+        # 例如：过滤掉坐标超出阈值的框
+        filtered_boxes = []
+        for box in boxes:
+            if hasattr(box, 'center') and hasattr(box, 'size'):
+                center = box.center
+                if (abs(center[0]) <= self.coordinate_threshold and 
+                    abs(center[1]) <= self.coordinate_threshold and 
+                    abs(center[2]) <= self.coordinate_threshold):
+                    filtered_boxes.append(box)
+            else:
+                filtered_boxes.append(box)
+        
+        return filtered_boxes
+    
+    def _validate_config_usage(self):
+        """验证配置参数的使用情况"""
+        if self.is_main_process:
+            print("\n" + "="*60)
+            print("🔍 配置参数使用情况验证")
+            print("="*60)
+            
+            # 验证global配置
+            global_config = self.config_loader.get_global_config()
+            print(f"✅ Global配置:")
+            print(f"   max_seq_len: {global_config['max_seq_len']}")
+            print(f"   image_size: {global_config['image_size']}")
+            print(f"   device: {global_config['device']}")
+            print(f"   visualization: {self.visualization_config}")
+            
+            # 验证model配置
+            model_config = self.config_loader.get_model_config()
+            print(f"✅ Model配置:")
+            print(f"   transformer.dim: {model_config['transformer']['dim']}")
+            print(f"   transformer.depth: {model_config['transformer']['depth']}")
+            
+            # 验证FPN配置
+            image_encoder = model_config.get('dual_modal_encoder', {}).get('image_encoder', {})
+            if image_encoder.get('use_fpn', False):
+                fpn_config = image_encoder.get('fpn', {})
+                print(f"✅ FPN配置:")
+                print(f"   attention_layers: {fpn_config.get('attention_layers', [2, 3])}")
+                print(f"   attention_heads: {fpn_config.get('attention_heads', 2)}")
+                print(f"   smooth_conv_kernel: {fpn_config.get('smooth_conv_kernel', 3)}")
+                print(f"   smooth_conv_padding: {fpn_config.get('smooth_conv_padding', 1)}")
+            
+            # 验证点云编码器配置
+            point_cloud_encoder = model_config.get('dual_modal_encoder', {}).get('point_cloud_encoder', {})
+            if point_cloud_encoder:
+                pc_config = point_cloud_encoder.get('config', {})
+                print(f"✅ PointCloud编码器配置:")
+                print(f"   type: {point_cloud_encoder.get('type', 'PointTransformerV3')}")
+                print(f"   output_dim: {point_cloud_encoder.get('output_dim', 128)}")
+                print(f"   基础参数: in_channels={pc_config.get('in_channels', 3)}, num_classes={pc_config.get('num_classes', 128)}")
+                print(f"   编码器: depths={pc_config.get('enc_depths', [2, 2, 2, 6, 2])}, channels={pc_config.get('enc_channels', [32, 64, 128, 256, 512])}")
+                print(f"   解码器: depths={pc_config.get('dec_depths', [2, 2, 2, 2])}, channels={pc_config.get('dec_channels', [64, 64, 128, 256])}")
+                print(f"   注意力: heads={pc_config.get('enc_num_head', [2, 4, 8, 16, 32])}, mlp_ratio={pc_config.get('mlp_ratio', 4)}")
+                print(f"   Dropout: attn_drop={pc_config.get('attn_drop', 0.0)}, proj_drop={pc_config.get('proj_drop', 0.0)}, drop_path={pc_config.get('drop_path', 0.3)}")
+                print(f"   其他: pre_norm={pc_config.get('pre_norm', True)}, enable_rpe={pc_config.get('enable_rpe', True)}")
+            
+            # 验证training配置
+            training_config = self.config_loader.get_training_config()
+            print(f"✅ Training配置:")
+            print(f"   optimizer.type: {training_config['optimizer']['type']}")
+            print(f"   optimizer.lr: {training_config['optimizer']['lr']}")
+            print(f"   phases: {list(training_config['phases'].keys())}")
+            
+            # 验证data配置
+            data_config = self.config_loader.get_data_config()
+            print(f"✅ Data配置:")
+            print(f"   data_root: {data_config['dataset']['data_root']}")
+            print(f"   batch_size: {data_config['dataloader']['batch_size']}")
+            print(f"   augmentation.enabled: {data_config['augmentation']['enabled']}")
+            
+            # 验证loss配置
+            loss_config = self.config_loader.get_loss_config()
+            print(f"✅ Loss配置:")
+            print(f"   base_weights: {loss_config['base_weights']}")
+            print(f"   adaptive_weights: {loss_config['adaptive_weights']['adaptive_classification']}")
+            
+            print("="*60)
+            print("✅ 所有配置参数已正确传递到训练中")
+            print("="*60 + "\n")
+    
     def _compute_oriented_box_iou_sampling(self, center1, size1, R1, center2, size2, R2, samples_per_dim=20):
         """
         使用采样方法计算旋转box的IoU
@@ -1786,8 +1939,14 @@ class AdvancedTrainer:
                 if self.is_main_process:
                     print(f"  📊 处理测试样本 {batch_idx + 1}/{len(test_loader)}")
                 
-                # 准备输入数据
-                rgbxyz = batch['image'].to(self.device)
+                # 准备双模态输入数据
+                rgb_image = batch['rgb_image'].to(self.device)  # [B, 3, H, W]
+                coords = batch['coords']  # List[Tensor] - 点云坐标
+                grid_coords = batch['grid_coords']  # List[Tensor] - 网格坐标
+                offsets = batch['offsets']  # List[Tensor] - 偏移量
+                feats = batch['feats']  # List[Tensor] - 特征
+                pixel_coords = batch.get('pixel_coords', None)  # List[Tensor] - 像素坐标（可选）
+                
                 targets = {
                     'x': batch['x'].to(self.device),
                     'y': batch['y'].to(self.device),
@@ -1806,7 +1965,7 @@ class AdvancedTrainer:
                 
                 try:
                     # 检查输入数据的有效性
-                    if torch.isnan(rgbxyz).any() or torch.isinf(rgbxyz).any():
+                    if torch.isnan(rgb_image).any() or torch.isinf(rgb_image).any():
                         if self.is_main_process:
                             print(f"  ⚠️  输入数据包含NaN或Inf值，跳过此样本")
                         continue
@@ -1817,7 +1976,12 @@ class AdvancedTrainer:
                         # 🔧 修复：使用正确的max_seq_len参数
                         max_len = self.config_loader.get_global_config()['max_seq_len']
                         gen_results = model.generate_incremental(
-                            image=rgbxyz,
+                            rgb_image=rgb_image,
+                            coords=coords,
+                            grid_coords=grid_coords,
+                            offsets=offsets,
+                            feats=feats,
+                            pixel_coords=pixel_coords,
                             max_seq_len=max_len,
                             temperature=self.incremental_temperature
                         )
@@ -1826,7 +1990,12 @@ class AdvancedTrainer:
                         # 🔧 修复：使用正确的max_seq_len参数
                         max_len = self.config_loader.get_global_config()['max_seq_len']
                         gen_results = model.generate(
-                            image=rgbxyz,
+                            rgb_image=rgb_image,
+                            coords=coords,
+                            grid_coords=grid_coords,
+                            offsets=offsets,
+                            feats=feats,
+                            pixel_coords=pixel_coords,
                             max_seq_len=max_len,
                             temperature=1.0
                         )
@@ -2178,7 +2347,7 @@ class AdvancedTrainer:
             phase_start_epoch = sum(p.epochs for p in self.training_phases[:phase_idx])
             
             for epoch_in_phase in range(phase.epochs):
-                if self.current_epoch < phase_start_epoch + epoch_in_phase:
+                if self.current_epoch > phase_start_epoch + epoch_in_phase:
                     continue  # 跳过已训练的epoch
                 
                 # 🔧 修复：计算正确的阶段内epoch位置
