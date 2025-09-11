@@ -2,10 +2,14 @@ import torch
 import torch.nn as nn
 from collections.abc import Mapping, Sequence
 from torch.utils.data.dataloader import default_collate
-import git
 
 def offset2bincount(offset):
     prepend_tensor = torch.tensor([0], device=offset.device, dtype=offset.dtype)
+    
+    # 确保offset是1维的
+    if offset.dim() > 1:
+        offset = offset.flatten()
+    
     extended_offset = torch.cat((prepend_tensor, offset))
     diff_result = extended_offset[1:] - extended_offset[:-1]
     return diff_result
@@ -151,8 +155,6 @@ class CrossEntropyLoss(nn.Module):
     def forward(self, pred, target):
         return self.loss(pred, target) * self.loss_weight
 
-def get_repo_dir():
-    return git.Repo(search_parent_directories=True).working_dir
 
 def flatten_dict(d, parent_key='', sep='/'):
     items = []

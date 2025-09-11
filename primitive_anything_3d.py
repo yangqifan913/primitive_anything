@@ -108,17 +108,20 @@ class GateLoopBlock(nn.Module):
 class EnhancedFPN(nn.Module):
     """超轻量版Feature Pyramid Network - 大幅降低内存占用"""
     def __init__(self, in_channels, out_channels=32, attention_heads=2, attention_layers=None, 
-                 smooth_conv_kernel=3, smooth_conv_padding=1):  # 支持配置化
+                 smooth_conv_kernel=3, smooth_conv_padding=1, backbone_channels=None):  # 支持配置化
         super().__init__()
         self.out_channels = out_channels
         
+        # 使用传入的backbone_channels，如果没有则使用默认值
+        if backbone_channels is None:
+            backbone_channels = [256, 512, 1024, 2048]  # ResNet50的默认通道数
+        
         # 侧边连接层 - 将不同层的特征统一到相同通道数
-        # ResNet50的通道数: [256, 512, 1024, 2048]
         self.lateral_convs = nn.ModuleList([
-            nn.Conv2d(256, out_channels, 1),   # layer1
-            nn.Conv2d(512, out_channels, 1),   # layer2
-            nn.Conv2d(1024, out_channels, 1),  # layer3
-            nn.Conv2d(2048, out_channels, 1),  # layer4
+            nn.Conv2d(backbone_channels[0], out_channels, 1),   # layer1
+            nn.Conv2d(backbone_channels[1], out_channels, 1),   # layer2
+            nn.Conv2d(backbone_channels[2], out_channels, 1),    # layer3
+            nn.Conv2d(backbone_channels[3], out_channels, 1),   # layer4
         ])
         
         # 简化的平滑层 - 使用配置中的参数
@@ -277,7 +280,8 @@ class ImageEncoder(nn.Module):
                 attention_heads=attention_heads,
                 attention_layers=attention_layers,
                 smooth_conv_kernel=smooth_conv_kernel,
-                smooth_conv_padding=smooth_conv_padding
+                smooth_conv_padding=smooth_conv_padding,
+                backbone_channels=self.backbone_channels
             )
             self.feature_dim = fpn_out_channels
         else:
@@ -351,35 +355,29 @@ class PointCloudEncoder(nn.Module):
         from point_transformer import PointTransformerV3
         
         # 创建点云编码器
-        # 如果传入了完整的point_cloud_encoder_config，使用它；否则使用基本参数
-        if point_cloud_encoder_config is not None:
-            # 使用传入的完整配置，但确保num_classes正确
-            final_point_cloud_config = point_cloud_encoder_config.copy()
-            final_point_cloud_config['num_classes'] = output_dim
-            
-            # 确保参数类型正确（元组而不是列表）
-            if 'order' in final_point_cloud_config and isinstance(final_point_cloud_config['order'], list):
-                final_point_cloud_config['order'] = tuple(final_point_cloud_config['order'])
-            if 'stride' in final_point_cloud_config and isinstance(final_point_cloud_config['stride'], list):
-                final_point_cloud_config['stride'] = tuple(final_point_cloud_config['stride'])
-            if 'enc_depths' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_depths'], list):
-                final_point_cloud_config['enc_depths'] = tuple(final_point_cloud_config['enc_depths'])
-            if 'enc_channels' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_channels'], list):
-                final_point_cloud_config['enc_channels'] = tuple(final_point_cloud_config['enc_channels'])
-            if 'enc_num_head' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_num_head'], list):
-                final_point_cloud_config['enc_num_head'] = tuple(final_point_cloud_config['enc_num_head'])
-            if 'enc_patch_size' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_patch_size'], list):
-                final_point_cloud_config['enc_patch_size'] = tuple(final_point_cloud_config['enc_patch_size'])
-        else:
-            # 向后兼容：使用基本参数构建配置
-            final_point_cloud_config = {
-                'in_channels': 3,  # XYZ数据
-                'num_classes': output_dim,  # 输出维度
-            }
+        final_point_cloud_config = point_cloud_encoder_config.copy()
+        
+        # 确保参数类型正确（元组而不是列表）
+        if 'order' in final_point_cloud_config and isinstance(final_point_cloud_config['order'], list):
+            final_point_cloud_config['order'] = tuple(final_point_cloud_config['order'])
+        if 'stride' in final_point_cloud_config and isinstance(final_point_cloud_config['stride'], list):
+            final_point_cloud_config['stride'] = tuple(final_point_cloud_config['stride'])
+        if 'enc_depths' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_depths'], list):
+            final_point_cloud_config['enc_depths'] = tuple(final_point_cloud_config['enc_depths'])
+        if 'enc_channels' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_channels'], list):
+            final_point_cloud_config['enc_channels'] = tuple(final_point_cloud_config['enc_channels'])
+        if 'enc_num_head' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_num_head'], list):
+            final_point_cloud_config['enc_num_head'] = tuple(final_point_cloud_config['enc_num_head'])
+        if 'enc_patch_size' in final_point_cloud_config and isinstance(final_point_cloud_config['enc_patch_size'], list):
+            final_point_cloud_config['enc_patch_size'] = tuple(final_point_cloud_config['enc_patch_size'])
         
         self.point_cloud_encoder = PointTransformerV3(**final_point_cloud_config)
         
-        print(f"PointCloudEncoder: PointTransformer -> {output_dim} (point cloud features)")
+        # 添加投影层将PointTransformerV3的输出映射到期望的输出维度
+        transformer_output_dim = final_point_cloud_config.get('enc_channels', (32, 64, 128, 256, 512))[-1]
+        self.output_projection = nn.Linear(transformer_output_dim, output_dim)
+        
+        print(f"PointCloudEncoder: PointTransformer({transformer_output_dim}) -> Linear -> {output_dim} (point cloud features)")
         
         # 打印点云编码器配置信息
         if point_cloud_encoder_config:
@@ -401,82 +399,89 @@ class PointCloudEncoder(nn.Module):
             data_dict: Dict - 点云数据字典，包含coord, grid_coord, offset, feat等字段
             
         Returns:
-            features: List[Tensor] - 点云特征列表，每个元素是[N_i, output_dim]
-            original_indices: List[Tensor] - 原始索引列表
-            pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
+            features: List[Tensor] - 点云特征列表，每个元素是[n_feat, output_dim]
+            pixel_coords_out: List[List[Tensor]] - 像素坐标列表，每个样本包含n_feat个特征对应的像素坐标
         """
-        # 直接通过点云编码器处理整个batch
+        # 分离pixel_coords，不输入到point_cloud_encoder中
+        pixel_coords = data_dict.get('pixel_coords', None)
+        # data_dict_for_encoder = {k: v for k, v in data_dict.items() if k != 'pixel_coords'}
+        # 直接通过点云编码器处理整个batch（不包含pixel_coords）
         point, orig2cur = self.point_cloud_encoder(data_dict)
-        
-        # 提取特征 - point.feat应该是整个batch的特征
-        # 需要根据batch信息分割成各个样本的特征
+        # 提取特征 - 按feature分组，每个feature对应多个pixel
         features = []
-        original_indices = []
         pixel_coords_out = []
         
         # 根据batch信息分割特征
-        batch_size = point.batch[-1] + 1  # 从batch字段获取batch大小
+        from utils.utils import offset2batch
+        original_batch = offset2batch(data_dict['offset'])
+        batch_size = len(data_dict['offset'])  # offset的长度就是batch size
+        
         for i in range(batch_size):
-            # 找到属于第i个样本的点
-            sample_mask = point.batch == i
-            sample_feat = point.feat[sample_mask]  # [N_i, output_dim]
-            sample_indices = orig2cur[sample_mask]  # [N_i]
-            
+            # 找到属于第i个样本的原始点
+            sample_mask = original_batch == i
+            # 使用orig2cur映射到处理后的特征
+            sample_indices = orig2cur[sample_mask]  # [N_i] - 每个原始点对应的feature索引
+            sample_pixel_coords = pixel_coords[sample_mask]  # [N_i, 2]
+            # 按feature分组：每个feature对应多个pixel
+            unique_features, inverse_indices = torch.unique(sample_indices, return_inverse=True)
+            # 为每个unique feature收集对应的pixel坐标
+            feature_pixels_list = []
+            for feat_idx in unique_features:
+                # 找到映射到当前feature的所有原始点
+                point_mask = (sample_indices == feat_idx)
+                feature_pixels = sample_pixel_coords[point_mask]  # [m, 2] - m个pixel
+                feature_pixels_list.append(feature_pixels)
+            # 获取对应的特征向量并投影到期望的输出维度
+            sample_feat = point.feat[unique_features]  # [n_feat, transformer_output_dim]
+            sample_feat = self.output_projection(sample_feat)  # [n_feat, output_dim]
             features.append(sample_feat)
-            original_indices.append(sample_indices)
-            
-            # 如果有像素坐标，也进行分割
-            if hasattr(point, 'pixel_coords') and point.pixel_coords is not None:
-                sample_pixel_coords = point.pixel_coords[sample_mask]  # [N_i, 2]
-                pixel_coords_out.append(sample_pixel_coords)
-            else:
-                pixel_coords_out.append(None)
+            pixel_coords_out.append(feature_pixels_list)
         
-        return features, original_indices, pixel_coords_out
+        return features, pixel_coords_out
     
-    def get_feature_pixel_mapping(self, features, original_indices, pixel_coords_out):
-        """
-        建立点云特征和原图像素的对应关系
+    # def get_feature_pixel_mapping(self, features, original_indices, pixel_coords_out):
+    #     """
+    #     建立点云特征和原图像素的对应关系
         
-        Args:
-            features: List[Tensor] - 点云特征列表，每个元素是[N_i, output_dim]
-            original_indices: List[Tensor] - 原始索引列表，每个元素是[N_i]，表示每个点对应哪个feature
-            pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
+    #     Args:
+    #         features: List[Tensor] - 点云特征列表，每个元素是[N_i, output_dim]
+    #         original_indices: List[Tensor] - 原始索引列表，每个元素是[N_i]，表示每个点对应哪个feature
+    #         pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
             
-        Returns:
-            mapping: List[Dict] - 每个样本的对应关系字典列表
-                    每个字典的key是feature索引，value是包含该feature的所有点的信息
-                    格式: {feature_idx: {'feature': Tensor, 'points': List[Dict]}}
-        """
-        mapping = []
+    #     Returns:
+    #         mapping: List[Dict] - 每个样本的对应关系字典列表
+    #                 每个字典的key是feature索引，value是包含该feature的所有点的信息
+    #                 格式: {feature_idx: {'feature': Tensor, 'points': List[Dict]}}
+    #     """
+    #     mapping = []
         
-        for i in range(len(features)):
-            pc_feat_i = features[i]           # [N_i, output_dim]
-            orig_idx_i = original_indices[i]  # [N_i]
-            pixel_coord_i = pixel_coords_out[i]  # [N_i, 2]
+    #     for i in range(len(features)):
+    #         pc_feat_i = features[i]           # [N_i, output_dim]
+    #         orig_idx_i = original_indices[i]  # [N_i]
+    #         pixel_coord_i = pixel_coords_out[i]  # [N_i, 2]
             
-            # 按feature索引分组
-            feature_groups = {}
+    #         # 按feature索引分组
+    #         feature_groups = {}
             
-            for j in range(pc_feat_i.shape[0]):
-                feature_idx = orig_idx_i[j].item()
+    #         for j in range(pc_feat_i.shape[0]):
+    #             feature_idx = orig_idx_i[j].item()
                 
-                if feature_idx not in feature_groups:
-                    feature_groups[feature_idx] = {
-                        'feature': pc_feat_i[j],  # 这个feature的特征向量
-                        'points': []  # 属于这个feature的所有点
-                    }
+    #             if feature_idx not in feature_groups:
+    #                 feature_groups[feature_idx] = {
+    #                     'feature': pc_feat_i[j],  # 这个feature的特征向量
+    #                     'points': []  # 属于这个feature的所有点
+    #                 }
                 
-                # 添加这个点的信息
-                feature_groups[feature_idx]['points'].append({
-                    'point_idx': j,  # 在原始点云中的索引
-                    'pixel_coord': pixel_coord_i[j],  # [2] - 像素坐标
-                    'point_coord': pc_feat_i[j]  # [output_dim] - 这个点的特征（与feature相同）
-                })
+    #             # 添加这个点的信息
+    #             feature_groups[feature_idx]['points'].append({
+    #                 'point_idx': j,  # 在原始点云中的索引
+    #                 'pixel_coord': pixel_coord_i[j],  # [2] - 像素坐标
+    #                 'point_coord': pc_feat_i[j]  # [output_dim] - 这个点的特征（与feature相同）
+    #             })
             
-            mapping.append(feature_groups)
+    #         mapping.append(feature_groups)
         
-        return mapping
+    #     return mapping
 
 
 class DualModalEncoder(nn.Module):
@@ -535,7 +540,7 @@ class DualModalEncoder(nn.Module):
         rgb_seq = rgb_2d.permute(0, 2, 3, 1).contiguous().view(B, Hf * Wf, C)  # [B, Hf*Wf, C]
 
         # 处理点云数据
-        pc_features, original_indices, pixel_coords_out = self.point_cloud_encoder(point_cloud_data)  # List[Tensor]
+        pc_features, pixel_coords_out = self.point_cloud_encoder(point_cloud_data)  # List[Tensor]
 
         # 融合特征 - 基于pc feature对应的像素集合，聚合RGB后与PC拼接
         fused_pc_features = []  # List[Tensor] with shape [N_feat_i, fusion_dim]
@@ -548,94 +553,92 @@ class DualModalEncoder(nn.Module):
             # 当前样本的RGB特征
             rgb_feat_seq = rgb_seq[i]  # [Hf*Wf, C]
 
-            # 当前样本的像素坐标（所有原始点的像素坐标）
-            pixel_coords_i = pixel_coords_out[i]  # [N_points, 2]
-
-            # 计算像素在特征图上的索引
-            if pixel_coords_i is None or pixel_coords_i.numel() == 0:
-                raise ValueError(f"Sample {i}: pixel_coords is None or empty. This indicates a data pipeline issue.")
+            # 当前样本的像素坐标（每个feature对应的像素坐标列表）
+            feature_pixels_list = pixel_coords_out[i]  # List[Tensor] - 每个feature对应的像素坐标
             
-            x_pix = pixel_coords_i[:, 0].to(pc_feat.device).float()  # [N_points]
-            y_pix = pixel_coords_i[:, 1].to(pc_feat.device).float()  # [N_points]
-            # 将原图像素坐标映射到特征图坐标
-            x_feat = (x_pix * (Wf / float(W_img))).floor().clamp(0, Wf - 1).long()
-            y_feat = (y_pix * (Hf / float(H_img))).floor().clamp(0, Hf - 1).long()
-            feat_idx = y_feat * Wf + x_feat  # [N_points] - 在特征图中的线性索引
-
-            # 获取所有原始点的RGB特征
-            all_rgb_feat = rgb_feat_seq[feat_idx]  # [N_points, C_rgb]
-
-            # 对每个PC feature，聚合其对应的所有原始点的RGB特征
-            orig_idx_i = original_indices[i]  # [N_feat_i] - 每个PC feature对应的原始点索引
+            # 对每个PC feature，聚合其对应的所有像素的RGB特征
+            fused_feat_list = []
             
-            # 按PC feature索引分组，聚合RGB特征
-            unique_feat, inv = torch.unique(orig_idx_i, sorted=True, return_inverse=True)
-            num_feats = unique_feat.shape[0]
+            for feat_idx, feature_pixels in enumerate(feature_pixels_list):
+                # 获取当前PC feature的特征向量
+                current_pc_feat = pc_feat[feat_idx].unsqueeze(0)  # [1, output_dim]
+                # feature_pixels: [m, 2] - 该feature对应的m个像素坐标
+                
+                # 计算像素在特征图上的索引
+                x_pix = feature_pixels[:, 0].to(pc_feat.device).float()  # [m]
+                y_pix = feature_pixels[:, 1].to(pc_feat.device).float()  # [m]
+                
+                # 将原图像素坐标映射到特征图坐标
+                x_feat = (x_pix * (Wf / float(W_img))).floor().clamp(0, Wf - 1).long()
+                y_feat = (y_pix * (Hf / float(H_img))).floor().clamp(0, Hf - 1).long()
+                feat_idx_linear = y_feat * Wf + x_feat  # [m] - 在特征图中的线性索引
+                # 获取该feature对应的所有像素的RGB特征
+                feature_rgb_feat = rgb_feat_seq[feat_idx_linear]  # [m, C_rgb]
+                # 对属于该feature的所有像素的RGB特征取平均
+                rgb_feat = feature_rgb_feat.mean(dim=0, keepdim=True)  # [1, C_rgb]
+                # 拼接当前PC feature与对应的RGB特征
+                combined = torch.cat([current_pc_feat, rgb_feat], dim=-1)  # [1, output_dim + C_rgb]
+                fused_feat = self.fusion_layer(combined)  # [1, fusion_dim]
+                fused_feat_list.append(fused_feat)
             
-            # 聚合RGB特征：对属于同一PC feature的所有原始点的RGB特征取平均
-            rgb_sum = torch.zeros(num_feats, all_rgb_feat.shape[-1], device=all_rgb_feat.device, dtype=all_rgb_feat.dtype)
-            rgb_sum.index_add_(0, inv, all_rgb_feat)
-            counts = torch.bincount(inv, minlength=num_feats).unsqueeze(-1)
-            rgb_avg = rgb_sum / counts  # [N_feat_i, C_rgb]
-
-            # 拼接PC features与聚合的RGB特征
-            combined = torch.cat([pc_feat, rgb_avg], dim=-1)  # [N_feat_i, output_dim + C_rgb]
-            fused_feat = self.fusion_layer(combined)  # [N_feat_i, fusion_dim]
+            fused_feat = torch.cat(fused_feat_list, dim=0)  # [N_feat_i, fusion_dim]
             fused_pc_features.append(fused_feat)
+            # print(len(fused_pc_features))
 
-        return fused_pc_features, original_indices, pixel_coords_out
+        return fused_pc_features
     
-    def get_feature_pixel_mapping(self, fused_features, original_indices, pixel_coords_out):
-        """
-        建立融合特征和原图像素的对应关系
+    # def get_feature_pixel_mapping(self, fused_features, original_indices, pixel_coords_out):
+    #     """
+    #     建立融合特征和原图像素的对应关系
         
-        Args:
-            fused_features: List[Tensor] - 融合特征列表，每个元素是[H*W, fusion_dim]
-            original_indices: List[Tensor] - 原始索引列表，每个元素是[N_i]，表示每个点对应哪个feature
-            pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
+    #     Args:
+    #         fused_features: List[Tensor] - 融合特征列表，每个元素是[H*W, fusion_dim]
+    #         original_indices: List[Tensor] - 原始索引列表，每个元素是[N_i]，表示每个点对应哪个feature
+    #         pixel_coords_out: List[Tensor] - 像素坐标列表，每个元素是[N_i, 2]
             
-        Returns:
-            mapping: List[Dict] - 每个样本的对应关系字典列表
-                    每个字典的key是feature索引，value是包含该feature的所有点的信息
-                    格式: {feature_idx: {'fused_feature': Tensor, 'points': List[Dict]}}
-        """
-        mapping = []
+    #     Returns:
+    #         mapping: List[Dict] - 每个样本的对应关系字典列表
+    #                 每个字典的key是feature索引，value是包含该feature的所有点的信息
+    #                 格式: {feature_idx: {'fused_feature': Tensor, 'points': List[Dict]}}
+    #     """
+    #     mapping = []
         
-        for i in range(len(fused_features)):
-            fused_feat_i = fused_features[i]       # [H*W, fusion_dim]
-            orig_idx_i = original_indices[i]       # [N_i]
-            pixel_coord_i = pixel_coords_out[i]    # [N_i, 2]
+    #     for i in range(len(fused_features)):
+    #         fused_feat_i = fused_features[i]       # [H*W, fusion_dim]
+    #         orig_idx_i = original_indices[i]       # [N_i]
+    #         pixel_coord_i = pixel_coords_out[i]    # [N_i, 2]
             
-            # 按feature索引分组
-            feature_groups = {}
+    #         # 按feature索引分组
+    #         feature_groups = {}
             
-            for j in range(orig_idx_i.shape[0]):
-                feature_idx = orig_idx_i[j].item()
+    #         for j in range(orig_idx_i.shape[0]):
+    #             feature_idx = orig_idx_i[j].item()
                 
-                if feature_idx not in feature_groups:
-                    feature_groups[feature_idx] = {
-                        'fused_feature': fused_feat_i[feature_idx],  # 这个feature的融合特征
-                        'points': []  # 属于这个feature的所有点
-                    }
+    #             if feature_idx not in feature_groups:
+    #                 feature_groups[feature_idx] = {
+    #                     'fused_feature': fused_feat_i[feature_idx],  # 这个feature的融合特征
+    #                     'points': []  # 属于这个feature的所有点
+    #                 }
                 
-                # 添加这个点的信息
-                feature_groups[feature_idx]['points'].append({
-                    'point_idx': j,  # 在原始点云中的索引
-                    'pixel_coord': pixel_coord_i[j],  # [2] - 像素坐标
-                })
+    #             # 添加这个点的信息
+    #             feature_groups[feature_idx]['points'].append({
+    #                 'point_idx': j,  # 在原始点云中的索引
+    #                 'pixel_coord': pixel_coord_i[j],  # [2] - 像素坐标
+    #             })
             
-            mapping.append(feature_groups)
+    #         mapping.append(feature_groups)
         
-        return mapping
+    #     return mapping
 
 @dataclass
 class IncrementalState:
     """增量生成状态 - 参考PrimitiveAnything实现"""
     current_sequence: torch.Tensor  # [B, current_len, embed_dim]
-    fused_embed: torch.Tensor      # [B, H*W, fusion_dim] - 融合后的特征
+    fused_embed: torch.Tensor      # [B, max_feat_len, fusion_dim] - 融合后的特征
     fused_cond: torch.Tensor       # [B, fusion_cond_dim] - 融合后的条件
     stopped_samples: torch.Tensor  # [B] 布尔值，标记哪些样本已停止
     current_step: int              # 当前步数
+    mask: torch.Tensor            # [B, max_feat_len] - 标记有效特征位置的mask
     
     # 多级KV缓存用于真正的增量解码（参考PrimitiveAnything）
     decoder_cache: Optional[object] = None  # Transformer decoder的cache
@@ -1071,6 +1074,34 @@ class PrimitiveTransformer3D(nn.Module):
         continuous = discrete.float() / (num_discrete - 1) * (max_val - min_val) + min_val
         return continuous
     
+    def masked_mean_pooling(self, features, mask):
+        """
+        使用mask进行平均池化，忽略填充的位置
+        
+        Args:
+            features: [batch_size, seq_len, feature_dim]
+            mask: [batch_size, seq_len] - True表示有效位置，False表示填充位置
+            
+        Returns:
+            pooled_features: [batch_size, feature_dim]
+        """
+        # 将mask扩展到feature维度
+        mask_expanded = mask.unsqueeze(-1).expand_as(features)  # [batch_size, seq_len, feature_dim]
+        
+        # 将填充位置设为0
+        masked_features = features * mask_expanded.float()
+        
+        # 计算每个样本的有效长度
+        valid_lengths = mask.sum(dim=1, keepdim=True).float()  # [batch_size, 1]
+        
+        # 避免除零
+        valid_lengths = torch.clamp(valid_lengths, min=1.0)
+        
+        # 计算masked平均
+        pooled_features = masked_features.sum(dim=1) / valid_lengths  # [batch_size, feature_dim]
+        
+        return pooled_features
+    
     def encode_primitive(self, x, y, z, w, h, l, primitive_mask):
         """编码3D基本体参数"""
         # 检查是否有有效的框
@@ -1140,17 +1171,46 @@ class PrimitiveTransformer3D(nn.Module):
             'grid_coord': grid_coords,
             'offset': offsets,
             'feat': feats,
-            'pixel_coords' = pixel_coords
+            'pixel_coords': pixel_coords,
         }
  
             
         
         # 使用双模态编码器处理RGB图像和点云数据
-        fused_embed, original_indices, pixel_coords_out = self.dual_modal_encoder(rgb_image, point_cloud_data)
+        fused_embed = self.dual_modal_encoder(rgb_image, point_cloud_data)
         
         # 将融合特征转换为统一的格式
-        # 假设每个样本的融合特征形状为 [H*W, fusion_dim]
-        # fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, H*W, fusion_dim]
+        # 处理变长点云特征：填充到最大长度并创建mask
+        if len(fused_embed) > 0:
+            # 找到最大特征数量
+            max_feat_len = max(feat.shape[0] for feat in fused_embed)
+            fusion_dim = fused_embed[0].shape[1]
+            batch_size = len(fused_embed)
+            
+            # 填充到统一长度并创建mask
+            padded_features = []
+            mask = torch.zeros(batch_size, max_feat_len, dtype=torch.bool, device=fused_embed[0].device)
+            
+            for i, feat in enumerate(fused_embed):
+                feat_len = feat.shape[0]
+                if feat_len < max_feat_len:
+                    # 用零填充
+                    padding = torch.zeros(max_feat_len - feat_len, fusion_dim, 
+                                        device=feat.device, dtype=feat.dtype)
+                    padded_feat = torch.cat([feat, padding], dim=0)
+                else:
+                    padded_feat = feat
+                padded_features.append(padded_feat)
+                
+                # 设置mask：有效位置为True，填充位置为False
+                mask[i, :feat_len] = True
+            
+            # 堆叠成batch
+            fused_embed = torch.stack(padded_features, dim=0)  # [batch_size, max_feat_len, fusion_dim]
+        else:
+            # 空batch的情况
+            fused_embed = torch.empty(0, 0, 0)
+            mask = torch.empty(0, 0, dtype=torch.bool)
         
         # 添加位置编码
         batch_size, seq_len, _ = codes.shape
@@ -1168,7 +1228,8 @@ class PrimitiveTransformer3D(nn.Module):
         
         # 融合特征条件化处理（RGB+点云融合特征）
         if self.condition_on_image and self.fused_film_cond is not None:
-            pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+            # 使用masked平均池化而不是简单平均
+            pooled_fused_embed = self.masked_mean_pooling(fused_embed, mask)  # [batch_size, fusion_dim]
             fused_cond = self.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
             primitive_codes = self.fused_film_cond(primitive_codes, fused_cond)  # FiLM调制
         
@@ -1180,6 +1241,7 @@ class PrimitiveTransformer3D(nn.Module):
         attended_codes = self.decoder(
             primitive_codes,
             context=fused_embed,
+            context_mask=mask,  # 添加mask来忽略填充的位置
         )
 
         return attended_codes
@@ -1304,11 +1366,49 @@ class PrimitiveTransformer3D(nn.Module):
         batch_size = rgb_image.shape[0]
         device = rgb_image.device
         
-        # 使用双模态编码器处理RGB图像和点云数据
-        fused_features, original_indices = self.dual_modal_encoder(rgb_image, coords, grid_coords, offsets, feats)
+        # 准备点云数据
+        point_cloud_data = {
+            'coord': torch.cat(coords, dim=0),
+            'grid_coord': torch.cat(grid_coords, dim=0), 
+            'offset': torch.cat(offsets, dim=0),
+            'feat': torch.cat(feats, dim=0),
+            'pixel_coords': torch.cat(pixel_coords, dim=0) if pixel_coords else None
+        }
         
-        # 将融合特征转换为统一的格式
-        fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, H*W, fusion_dim]
+        # 使用双模态编码器处理RGB图像和点云数据
+        fused_embed = self.dual_modal_encoder(rgb_image, point_cloud_data)
+        
+        # 将融合特征转换为统一的格式并创建mask
+        if len(fused_embed) > 0:
+            # 找到最大特征数量
+            max_feat_len = max(feat.shape[0] for feat in fused_embed)
+            fusion_dim = fused_embed[0].shape[1]
+            batch_size = len(fused_embed)
+            
+            # 填充到统一长度并创建mask
+            padded_features = []
+            mask = torch.zeros(batch_size, max_feat_len, dtype=torch.bool, device=fused_embed[0].device)
+            
+            for i, feat in enumerate(fused_embed):
+                feat_len = feat.shape[0]
+                if feat_len < max_feat_len:
+                    # 用零填充
+                    padding = torch.zeros(max_feat_len - feat_len, fusion_dim, 
+                                        device=feat.device, dtype=feat.dtype)
+                    padded_feat = torch.cat([feat, padding], dim=0)
+                else:
+                    padded_feat = feat
+                padded_features.append(padded_feat)
+                
+                # 设置mask：有效位置为True，填充位置为False
+                mask[i, :feat_len] = True
+            
+            # 堆叠成batch
+            fused_embed = torch.stack(padded_features, dim=0)  # [batch_size, max_feat_len, fusion_dim]
+        else:
+            # 空batch的情况
+            fused_embed = torch.empty(0, 0, 0)
+            mask = torch.empty(0, 0, dtype=torch.bool)
         
         
         # 为每个样本独立跟踪3D生成结果
@@ -1339,7 +1439,8 @@ class PrimitiveTransformer3D(nn.Module):
             
             # 融合特征条件化处理（RGB+点云融合特征）
             if self.condition_on_image and self.fused_film_cond is not None:
-                pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+                # 使用masked平均池化而不是简单平均
+                pooled_fused_embed = self.masked_mean_pooling(fused_embed, mask)  # [batch_size, fusion_dim]
                 fused_cond = self.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
                 primitive_codes = self.fused_film_cond(primitive_codes, fused_cond)  # FiLM调制
             
@@ -1527,10 +1628,11 @@ class PrimitiveTransformer3D(nn.Module):
     def initialize_incremental_generation(
         self,
         rgb_image: Tensor,
-        coords: List[Tensor],
-        grid_coords: List[Tensor],
-        offsets: List[Tensor],
-        feats: List[Tensor],
+        coords: Tensor,
+        grid_coords: Tensor,
+        offsets: Tensor,
+        feats: Tensor,
+        pixel_coords: Tensor = None,
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5
@@ -1557,16 +1659,54 @@ class PrimitiveTransformer3D(nn.Module):
         
         # 1. 使用双模态编码器处理RGB图像和点云数据（只计算一次）
         with torch.no_grad():
-            fused_features, original_indices = self.dual_modal_encoder(rgb_image, coords, grid_coords, offsets, feats)
+            # 准备点云数据
+            point_cloud_data = {
+                'coord': coords,
+                'grid_coord': grid_coords, 
+                'offset': offsets,
+                'feat': feats,
+                'pixel_coords': pixel_coords
+            }
             
-            # 将融合特征转换为统一的格式
-            fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, H*W, fusion_dim]
+            fused_embed = self.dual_modal_encoder(rgb_image, point_cloud_data)
             
+            # 将融合特征转换为统一的格式并创建mask
+            if len(fused_embed) > 0:
+                # 找到最大特征数量
+                max_feat_len = max(feat.shape[0] for feat in fused_embed)
+                fusion_dim = fused_embed[0].shape[1]
+                batch_size = len(fused_embed)
+                
+                # 填充到统一长度并创建mask
+                padded_features = []
+                mask = torch.zeros(batch_size, max_feat_len, dtype=torch.bool, device=fused_embed[0].device)
+                
+                for i, feat in enumerate(fused_embed):
+                    feat_len = feat.shape[0]
+                    if feat_len < max_feat_len:
+                        # 用零填充
+                        padding = torch.zeros(max_feat_len - feat_len, fusion_dim, 
+                                            device=feat.device, dtype=feat.dtype)
+                        padded_feat = torch.cat([feat, padding], dim=0)
+                    else:
+                        padded_feat = feat
+                    padded_features.append(padded_feat)
+                    
+                    # 设置mask：有效位置为True，填充位置为False
+                    mask[i, :feat_len] = True
+                
+                # 堆叠成batch
+                fused_embed = torch.stack(padded_features, dim=0)  # [batch_size, max_feat_len, fusion_dim]
+            else:
+                # 空batch的情况
+                fused_embed = torch.empty(0, 0, 0)
+                mask = torch.empty(0, 0, dtype=torch.bool)
             
             # 准备融合特征条件化（RGB+点云融合特征）
             fused_cond = None
             if self.condition_on_image and self.fused_film_cond is not None:
-                pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+                # 使用masked平均池化而不是简单平均
+                pooled_fused_embed = self.masked_mean_pooling(fused_embed, mask)  # [batch_size, fusion_dim]
                 fused_cond = self.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
         
         # 2. 初始化序列状态
@@ -1591,6 +1731,7 @@ class PrimitiveTransformer3D(nn.Module):
             fused_cond=fused_cond,
             stopped_samples=stopped_samples,
             current_step=0,
+            mask=mask,
             decoder_cache=None,
             gateloop_cache=[],
             generated_boxes=generated_boxes
@@ -1645,6 +1786,7 @@ class PrimitiveTransformer3D(nn.Module):
             attended_codes, decoder_cache = self.decoder(
                 primitive_codes,
                 context=state.fused_embed,
+                context_mask=state.mask,  # 添加mask
                 cache=None,  # 第一次调用，无缓存
                 return_hiddens=True  # 返回中间状态用于缓存
             )
@@ -1683,6 +1825,7 @@ class PrimitiveTransformer3D(nn.Module):
             attended_codes, new_decoder_cache = self.decoder(
                 primitive_codes,  # 只有新token [B, 1, dim]
                 context=state.fused_embed,
+                context_mask=state.mask,  # 添加mask
                 cache=state.decoder_cache,  # 使用之前的decoder缓存
                 return_hiddens=True
             )
@@ -1836,10 +1979,11 @@ class PrimitiveTransformer3D(nn.Module):
     def generate_incremental(
         self,
         rgb_image: Tensor,
-        coords: List[Tensor],
-        grid_coords: List[Tensor],
-        offsets: List[Tensor],
-        feats: List[Tensor],
+        coords: Tensor,
+        grid_coords: Tensor,
+        offsets: Tensor,
+        feats: Tensor,
+        pixel_coords: Tensor = None,
         max_seq_len: Optional[int] = None,
         temperature: float = 1.0,
         eos_threshold: float = 0.5,
@@ -1867,7 +2011,7 @@ class PrimitiveTransformer3D(nn.Module):
         device = rgb_image.device
         
         # 初始化生成状态
-        state = self.initialize_incremental_generation(rgb_image, coords, grid_coords, offsets, feats, max_seq_len, temperature, eos_threshold)
+        state = self.initialize_incremental_generation(rgb_image, coords, grid_coords, offsets, feats, pixel_coords, max_seq_len, temperature, eos_threshold)
         
         # 逐步生成
         for step in range(max_seq_len):
@@ -1907,5 +2051,8 @@ class PrimitiveTransformer3D(nn.Module):
                 if seq_len > 0:
                     # 连接tensor列表，每个元素是[1]形状的tensor
                     result[attr][i, :seq_len] = torch.cat(generated_boxes[attr][i], dim=0)
+        
+        # 添加长度信息，方便后续统计
+        result['generated_lengths'] = torch.tensor([len(generated_boxes['x'][i]) for i in range(batch_size)], device=device)
         
         return result 

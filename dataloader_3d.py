@@ -25,10 +25,8 @@ class GridSample(object):
     def __init__(self, grid_size=0.05, mode="train"):
         self.grid_size = grid_size
         self.hash = self.fnv_hash_vec
-        if mode == "train":
-            self.keys=("coord",)
-        elif mode == "test":
-            self.keys=("coord",)
+        # 为所有模式设置keys，包括val模式
+        self.keys = ("coord",)
 
     def __call__(self, data_dict):
         assert "coord" in data_dict.keys()
@@ -107,16 +105,27 @@ class Collect(object):
         data = dict()
         if isinstance(self.keys, str):
             self.keys = [self.keys]
+        
         for key in self.keys:
-            data[key] = data_dict[key]
+            if key in data_dict:
+                data[key] = data_dict[key]
+        
         for key, value in self.offset_keys.items():
-            data[key] = torch.tensor([data_dict[value].shape[0]])
+            if value in data_dict:
+                # offset应该是累积偏移量，对于单个样本，offset就是[0, num_points]
+                num_points = data_dict[value].shape[0]
+                data[key] = torch.tensor([0, num_points], dtype=torch.long)
+        
         for name, keys in self.kwargs.items():
             name = name.replace("_keys", "")
             assert isinstance(keys, Sequence)
             if len(keys) > 3: 
                 keys = [keys]
-            data[name] = torch.cat([data_dict[key].float() for key in keys], dim=1)
+            # 如果只有一个key，直接使用该key的数据
+            if len(keys) == 1:
+                data[name] = data_dict[keys[0]].float()
+            else:
+                data[name] = torch.cat([data_dict[key].float() for key in keys], dim=1)
         
         # 保持像素坐标映射关系
         if "pixel_coords" in data_dict:
@@ -194,7 +203,9 @@ class RandomDropout(object):
     def __call__(self, data_dict):
         if random.random() < self.dropout_application_ratio:
             n = len(data_dict["coord"])
-            idx = np.random.choice(n, int(n * (1 - self.dropout_ratio)), replace=False)
+            # 确保至少保留1个点，避免空点云
+            keep_count = max(1, int(n * (1 - self.dropout_ratio)))
+            idx = np.random.choice(n, keep_count, replace=False)
             if "coord" in data_dict.keys():
                 data_dict["coord"] = data_dict["coord"][idx]
             
@@ -247,12 +258,14 @@ class Box3DDataset(Dataset):
         
         # 🔧 修复：数据增强设置 - 优先使用传入的augmentation_config
         if augmentation_config is not None:
-            self.aug_config = augmentation_config
+            self.augmentation_config = augmentation_config
+            self.aug_config = augmentation_config  # 保持向后兼容
             self.augment = augment if augment is not None else augmentation_config.get('enabled', False)
             base_intensity = augmentation_config.get('intensity', 1.0)
             self.augment_intensity = augment_intensity if augment_intensity is not None else base_intensity
         else:
             # 回退到默认值
+            self.augmentation_config = {}
             self.aug_config = {}
             self.augment = augment if augment is not None else False
             self.augment_intensity = augment_intensity if augment_intensity is not None else 1.0
@@ -283,7 +296,6 @@ class Box3DDataset(Dataset):
         # 点云变换，参考segment_dataset.py
         self.grid = GridSample(grid_size=0.05, mode=stage)
         self.totensor = ToTensor()
-        self.collect = Collect(keys=("coord", "grid_coord"), feat_keys=("coord",))
         
         # 使用continuous_ranges进行点云切割
         # 从augmentation_config中获取裁剪参数
@@ -697,7 +709,19 @@ class Box3DDataset(Dataset):
         point_cloud_dict = self.grid(point_cloud_dict)
         point_cloud_dict = self.crop(point_cloud_dict)
         point_cloud_dict = self.totensor(point_cloud_dict)
-        point_cloud_dict = self.collect(point_cloud_dict)
+        # 手动处理点云数据，不使用Collect类
+        # 确保coord和grid_coord存在
+        if 'coord' not in point_cloud_dict:
+            raise ValueError("point_cloud_dict中缺少'coord'字段")
+        if 'grid_coord' not in point_cloud_dict:
+            raise ValueError("point_cloud_dict中缺少'grid_coord'字段")
+        
+        # 生成offset: [0, num_points]
+        num_points = point_cloud_dict['coord'].shape[0]
+        point_cloud_dict['offset'] = torch.tensor([0, num_points], dtype=torch.long)
+        
+        # 生成feat: 使用coord作为特征
+        point_cloud_dict['feat'] = point_cloud_dict['coord'].float()
         
         # 提取处理后的点云数据
         # point_cloud = point_cloud_dict['coord']  # (N, 3) - XYZ坐标
@@ -714,7 +738,7 @@ class Box3DDataset(Dataset):
             'rotations': rotations_padded,  # (max_boxes, 4) - 四元数旋转
             'folder_name': sample['folder_name']  # 用于调试
         }
-        
+        # print(f"point_cloud_dict: {point_cloud_dict['grid_coord'].shape}")
         # 添加点云数据字段到结果中
         result.update(point_cloud_dict)
         
@@ -783,7 +807,7 @@ def collate_fn(batch):
     # 固定大小的字段（会被stack）
     fixed_fields = ['rgb_image', 'x', 'y', 'z', 'w', 'h', 'l', 'rotations']
     # 变长的字段（保持为列表）
-    variable_fields = ['coord', 'grid_coord', 'offset', 'feat', 'pixel_coords', 'folder_name']
+    variable_fields = ['coord', 'grid_coord', 'feat', 'pixel_coords', 'folder_name']
     
     for field in fixed_fields:
         if field in batch[0]:
@@ -793,12 +817,39 @@ def collate_fn(batch):
         if field in batch[0]:
             variable_size_data[field] = [sample[field] for sample in batch]
     
+    # 特殊处理offset字段 - 需要合并成累积偏移量
+    offset_data = None
+    if 'offset' in batch[0]:
+        offsets_list = [sample['offset'] for sample in batch]
+        # 合并所有样本的offset，生成累积偏移量
+        # offset2bincount期望的格式：[cumulative_points]，不包含开头的0
+        cumulative_offset = []
+        current_offset = 0
+        for offset in offsets_list:
+            # offset是[0, num_points]，我们只需要num_points
+            num_points = offset[-1].item()
+            current_offset += num_points
+            cumulative_offset.append(current_offset)
+        offset_data = torch.tensor(cumulative_offset, dtype=torch.long)
+    
     # 堆叠固定大小的张量
     for field, data_list in fixed_size_data.items():
         fixed_size_data[field] = torch.stack(data_list, dim=0)
     
+    # 合并变长的张量 - 将所有样本的点云数据首尾相连
+    for field, data_list in variable_size_data.items():
+        if field in ['coord', 'grid_coord', 'feat', 'pixel_coords']:
+            variable_size_data[field] = torch.cat(data_list, dim=0)
+        else:
+            # 对于非张量字段，保持为列表
+            variable_size_data[field] = data_list
+    
     # 合并结果
     result = {**fixed_size_data, **variable_size_data}
+    
+    # 添加处理后的offset数据
+    if offset_data is not None:
+        result['offset'] = offset_data
     
     return result
 

@@ -7,6 +7,7 @@ from .hilbert import decode as hilbert_decode_
 
 @torch.inference_mode()
 def encode(grid_coord, batch=None, depth=16, order="z"):
+    # print(f"encode grid_coord: {grid_coord.shape}, batch: {batch.shape}")
     assert order in {"z", "z-trans", "hilbert", "hilbert-trans"}
     if order == "z":
         code = z_order_encode(grid_coord, depth=depth)
@@ -18,6 +19,7 @@ def encode(grid_coord, batch=None, depth=16, order="z"):
         code = hilbert_encode(grid_coord[:, [1, 0, 2]], depth=depth)
     else:
         raise NotImplementedError
+    # print(f"encode code: {code.shape}")
     if batch is not None:
         batch = batch.long()
         code = batch << depth * 3 | code

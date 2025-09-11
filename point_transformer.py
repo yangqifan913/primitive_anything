@@ -55,6 +55,7 @@ class Point(Dict):
         #  Order2 ([n]),
         #   ...
         #  OrderN ([n])] (k, n)
+        # print(f"grid_coord: {self.grid_coord.shape}, batch: {self.batch.shape}")
         code = [
             encode(self.grid_coord, self.batch, depth, order=order_) for order_ in order
         ]
@@ -728,18 +729,13 @@ class SegmentHead(nn.Module):
 class PointTransformerV3(PointModule):
     def __init__(
         self,
-        in_channels=6,
-        backbone_out_channels = 64,
+        in_channels=3,
         order=("z", "z-trans"),
         stride=(2, 2, 2, 2),
         enc_depths=(2, 2, 2, 6, 2),
         enc_channels=(32, 64, 128, 256, 512),
         enc_num_head=(2, 4, 8, 16, 32),
         enc_patch_size=(48, 48, 48, 48, 48),
-        dec_depths=(2, 2, 2, 2),
-        dec_channels=(64, 64, 128, 256),
-        dec_num_head=(4, 4, 8, 16),
-        dec_patch_size=(48, 48, 48, 48),
         mlp_ratio=4,
         qkv_bias=True,
         qk_scale=None,
@@ -824,52 +820,6 @@ class PointTransformerV3(PointModule):
                 )
             if len(enc) != 0:
                 self.enc.add(module=enc, name=f"enc{s}")
-
-        # decoder
-
-        dec_drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
-        ]
-        self.dec = PointSequential()
-        dec_channels = list(dec_channels) + [enc_channels[-1]]
-        for s in reversed(range(self.num_stages - 1)):
-            dec_drop_path_ = dec_drop_path[
-                sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
-            ]
-            dec_drop_path_.reverse()
-            dec = PointSequential()
-            dec.add(
-                GridUnpooling(
-                    in_channels=dec_channels[s + 1],
-                    skip_channels=enc_channels[s],
-                    out_channels=dec_channels[s],
-                    norm_layer=bn_layer,
-                    act_layer=act_layer,
-                    traceable=traceable,
-                ),
-                name="up",
-            )
-            for i in range(dec_depths[s]):
-                dec.add(
-                    Block(
-                        channels=dec_channels[s],
-                        num_heads=dec_num_head[s],
-                        patch_size=dec_patch_size[s],
-                        mlp_ratio=mlp_ratio,
-                        qkv_bias=qkv_bias,
-                        qk_scale=qk_scale,
-                        attn_drop=attn_drop,
-                        proj_drop=proj_drop,
-                        drop_path=dec_drop_path_[i],
-                        norm_layer=ln_layer,
-                        act_layer=act_layer,
-                        pre_norm=pre_norm,
-                        order_index=i % len(self.order),
-                        enable_rpe=enable_rpe,
-                    ),
-                    name=f"block{i}",
-                )
-            self.dec.add(module=dec, name=f"dec{s}")
         self.apply(self._init_weights)
 
     @staticmethod
@@ -885,6 +835,7 @@ class PointTransformerV3(PointModule):
 
     def forward(self, data_dict):
         point = Point(data_dict)
+        # print(f"point: {point.grid_coord.shape}, batch: {point.batch.shape}")
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.octreelization()
 

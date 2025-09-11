@@ -57,6 +57,7 @@ class TrainingStats:
     train_classification_loss: float
     train_iou_loss: float
     train_delta_loss: float
+    train_eos_loss: float
     train_mean_iou: float
     val_loss: float
     val_generation_loss: float
@@ -250,7 +251,9 @@ class AdvancedTrainer:
         discretization = model_config.get('discretization', {})
         embeddings = model_config.get('embeddings', {})
         transformer = model_config.get('transformer', {})
-        image_encoder = model_config.get('image_encoder', {})
+        # image_encoder 在 dual_modal_encoder 下面
+        dual_modal_encoder = model_config.get('dual_modal_encoder', {})
+        image_encoder = dual_modal_encoder.get('image_encoder', {})
         conditioning = model_config.get('conditioning', {})
         advanced = model_config.get('advanced', {})
         
@@ -280,7 +283,7 @@ class AdvancedTrainer:
         }
         
         # 构建point_cloud_encoder_config
-        point_cloud_encoder_config = model_config.get('dual_modal_encoder', {}).get('point_cloud_encoder', {}).get('config', {})
+        point_cloud_encoder_config = dual_modal_encoder.get('point_cloud_encoder', {}).get('config', {})
         
         self.model = PrimitiveTransformer3D(
             # 离散化参数
@@ -436,6 +439,7 @@ class AdvancedTrainer:
             print(f"❌ 错误: batch_size={effective_batch_size}，强制设置为1")
             effective_batch_size = 1
         
+        from dataloader_3d import collate_fn
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=effective_batch_size,
@@ -445,7 +449,8 @@ class AdvancedTrainer:
             pin_memory=dataloader_config['pin_memory'],
             drop_last=True,
             prefetch_factor=dataloader_config['prefetch_factor'] if dataloader_config['num_workers'] > 0 else None,
-            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False
+            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False,
+            collate_fn=collate_fn  # 使用自定义collate函数处理变长点云数据
         )
         
         self.val_loader = DataLoader(
@@ -457,7 +462,8 @@ class AdvancedTrainer:
             pin_memory=dataloader_config['pin_memory'],
             drop_last=False,
             prefetch_factor=dataloader_config['prefetch_factor'] if dataloader_config['num_workers'] > 0 else None,
-            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False
+            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False,
+            collate_fn=collate_fn  # 使用自定义collate函数处理变长点云数据
         )
         
         # 优化器 - 移除硬编码
@@ -589,11 +595,14 @@ class AdvancedTrainer:
         """
         # 双模态输入：RGB图像 + 点云数据
         rgb_image = batch['rgb_image'].to(self.device)  # [B, 3, H, W]
-        coords = batch['coords']  # List[Tensor] - 点云坐标
-        grid_coords = batch['grid_coords']  # List[Tensor] - 网格坐标
-        offsets = batch['offsets']  # List[Tensor] - 偏移量
-        feats = batch['feats']  # List[Tensor] - 特征
+        coords = batch['coord'].to(self.device)  # Tensor - 点云坐标
+        # print(f"coords: {coords.shape}")
+        grid_coords = batch['grid_coord'].to(self.device)  # Tensor - 网格坐标
+        offsets = batch['offset'].to(self.device)  # Tensor - 偏移量
+        feats = batch['feat'].to(self.device)  # Tensor - 特征
         pixel_coords = batch.get('pixel_coords', None)  # List[Tensor] - 像素坐标（可选）
+        if pixel_coords is not None:
+            pixel_coords = pixel_coords.to(self.device)
         
         targets = {
             'x': batch['x'].to(self.device),
@@ -615,6 +624,7 @@ class AdvancedTrainer:
             # 完全teacher forcing：直接用GT
             inputs = targets
             # 统一使用forward_with_predictions
+            # print(f"grid_coords: {grid_coords.shape}")
             outputs = model.forward_with_predictions(
                 x=inputs['x'],
                 y=inputs['y'],
@@ -747,15 +757,45 @@ class AdvancedTrainer:
             point_cloud_data['pixel_coords'] = pixel_coords
         
         # 使用双模态编码器
-        fused_features, original_indices, pixel_coords_out = model.dual_modal_encoder(rgb_image, point_cloud_data)
+        fused_features = model.dual_modal_encoder(rgb_image, point_cloud_data)
         
-        # 将融合特征转换为统一的格式
-        fused_embed = torch.stack(fused_features, dim=0)  # [batch_size, N_feat_i, fusion_dim]
+        # 将融合特征转换为统一的格式并创建mask
+        if len(fused_features) > 0:
+            # 找到最大特征数量
+            max_feat_len = max(feat.shape[0] for feat in fused_features)
+            fusion_dim = fused_features[0].shape[1]
+            batch_size = len(fused_features)
+            
+            # 填充到统一长度并创建mask
+            padded_features = []
+            mask = torch.zeros(batch_size, max_feat_len, dtype=torch.bool, device=fused_features[0].device)
+            
+            for i, feat in enumerate(fused_features):
+                feat_len = feat.shape[0]
+                if feat_len < max_feat_len:
+                    # 用零填充
+                    padding = torch.zeros(max_feat_len - feat_len, fusion_dim, 
+                                        device=feat.device, dtype=feat.dtype)
+                    padded_feat = torch.cat([feat, padding], dim=0)
+                else:
+                    padded_feat = feat
+                padded_features.append(padded_feat)
+                
+                # 设置mask：有效位置为True，填充位置为False
+                mask[i, :feat_len] = True
+            
+            # 堆叠成batch
+            fused_embed = torch.stack(padded_features, dim=0)  # [batch_size, max_feat_len, fusion_dim]
+        else:
+            # 空batch的情况
+            fused_embed = torch.empty(0, 0, 0)
+            mask = torch.empty(0, 0, dtype=torch.bool)
         
         # 融合特征条件化处理（RGB+点云融合特征）
         fused_cond = None
         if model.condition_on_image and model.fused_film_cond is not None:
-            pooled_fused_embed = fused_embed.mean(dim=1)  # 对融合特征进行全局平均池化
+            # 使用masked平均池化而不是简单平均
+            pooled_fused_embed = model.masked_mean_pooling(fused_embed, mask)  # [batch_size, fusion_dim]
             fused_cond = model.fused_cond_proj_film(pooled_fused_embed)  # 投影到条件维度
         
         # 2. 初始化序列状态
@@ -795,6 +835,7 @@ class AdvancedTrainer:
                 attended_codes, decoder_cache = model.decoder(
                     primitive_codes,
                     context=fused_embed,
+                    context_mask=mask,  # 添加mask
                     cache=None,
                     return_hiddens=True
                 )
@@ -821,6 +862,7 @@ class AdvancedTrainer:
                 attended_codes, decoder_cache = model.decoder(
                     primitive_codes,
                     context=fused_embed,
+                    context_mask=mask,  # 添加mask
                     cache=decoder_cache,
                     return_hiddens=True
                 )
@@ -931,6 +973,7 @@ class AdvancedTrainer:
         total_cls_loss = 0.0
         total_iou_loss = 0.0
         total_delta_loss = 0.0
+        total_eos_loss = 0.0
         total_mean_iou = 0.0
         total_adaptive_cls_weight = 0.0
         total_adaptive_delta_weight = 0.0
@@ -940,7 +983,7 @@ class AdvancedTrainer:
         
         for batch_idx, batch in enumerate(self.train_loader):
             self.optimizer.zero_grad()
-            
+            # print(batch['grid_coord'].shape)
             with autocast(enabled=self.use_amp):
                 # 前向传播
                 outputs = self._forward_with_sampling_strategy(batch, teacher_forcing_ratio)
@@ -989,6 +1032,7 @@ class AdvancedTrainer:
             total_cls_loss += loss_dict['total_classification'].item()
             total_iou_loss += loss_dict['iou_loss'].item()
             total_delta_loss += loss_dict['total_delta'].item()
+            total_eos_loss += loss_dict.get('eos_loss', torch.tensor(0.0)).item()
             total_mean_iou += loss_dict['mean_iou'].item()
             total_adaptive_cls_weight += loss_dict.get('adaptive_classification_weight', torch.tensor(0.0)).item()
             total_adaptive_delta_weight += loss_dict.get('adaptive_delta_weight', torch.tensor(0.0)).item()
@@ -1021,6 +1065,7 @@ class AdvancedTrainer:
             train_classification_loss=total_cls_loss / num_batches,
             train_iou_loss=total_iou_loss / num_batches,
             train_delta_loss=total_delta_loss / num_batches,
+            train_eos_loss=total_eos_loss / num_batches,
             train_mean_iou=total_mean_iou / num_batches,
             val_loss=0.0,  # 稍后填充
             val_generation_loss=0.0,
@@ -1103,11 +1148,13 @@ class AdvancedTrainer:
                 # 2. 纯生成验证
                 # 双模态输入：RGB图像 + 点云数据
                 rgb_image = batch['rgb_image'].to(self.device)  # [B, 3, H, W]
-                coords = batch['coords']  # List[Tensor] - 点云坐标
-                grid_coords = batch['grid_coords']  # List[Tensor] - 网格坐标
-                offsets = batch['offsets']  # List[Tensor] - 偏移量
-                feats = batch['feats']  # List[Tensor] - 特征
-                pixel_coords = batch.get('pixel_coords', None)  # List[Tensor] - 像素坐标（可选）
+                coords = batch['coord'].to(self.device)  # List[Tensor] - 点云坐标
+                grid_coords = batch['grid_coord'].to(self.device)  # List[Tensor] - 网格坐标
+                offsets = batch['offset'].to(self.device)  # Tensor - 偏移量
+                feats = batch['feat'].to(self.device)  # Tensor - 特征
+                pixel_coords = batch.get('pixel_coords', None)  # Tensor - 像素坐标（可选）
+                if pixel_coords is not None:
+                    pixel_coords = pixel_coords.to(self.device)
                 
                 if hasattr(self.model, 'module'):
                     model = self.model.module
@@ -1177,7 +1224,7 @@ class AdvancedTrainer:
                         'ground_truth': targets,
                         'tf_loss': tf_loss_dict['total_loss'].item(),
                         'gen_iou': gen_metrics['iou'],
-                        'image_shape': rgbxyz.shape
+                        'image_shape': rgb_image.shape
                     })
         
         # 保存验证结果 - 只在主进程保存
@@ -1450,10 +1497,23 @@ class AdvancedTrainer:
                 gt_valid = (targets['x'][b] != -1.0).sum().item()
                 num_gt_boxes += gt_valid
                 
-                # 统计生成的箱子数量 (简化：检查是否生成了有效坐标)
-                if 'x' in processed_gen_results:
-                    gen_valid = (processed_gen_results['x'][b] != 0.0).sum().item()  # 假设0为填充值
-                    num_generated_boxes += gen_valid
+                # 统计生成的箱子数量 - 使用长度信息
+                if 'generated_lengths' in processed_gen_results:
+                    # 直接使用长度信息（最准确的方法）
+                    num_generated_boxes += processed_gen_results['generated_lengths'][b].item()
+                elif 'x' in processed_gen_results:
+                    # 备用方法：通过x坐标判断（因为x的最小值是0.5）
+                    gen_x = processed_gen_results['x'][b]
+                    actual_length = 0
+                    for i in range(len(gen_x)):
+                        x_val = gen_x[i]
+                        if x_val < 0.5:  # x坐标小于最小值，说明这是padding
+                            actual_length = i
+                            break
+                    else:
+                        actual_length = len(gen_x)  # 如果没有找到padding，说明全部都是生成的
+                    
+                    num_generated_boxes += actual_length
             
             # 合并所有指标 - 移除虚假的损失值
             metrics = {
@@ -1751,7 +1811,7 @@ class AdvancedTrainer:
                 print(f"✅ PointCloud编码器配置:")
                 print(f"   type: {point_cloud_encoder.get('type', 'PointTransformerV3')}")
                 print(f"   output_dim: {point_cloud_encoder.get('output_dim', 128)}")
-                print(f"   基础参数: in_channels={pc_config.get('in_channels', 3)}, num_classes={pc_config.get('num_classes', 128)}")
+                print(f"   基础参数: in_channels={pc_config.get('in_channels', 3)}")
                 print(f"   编码器: depths={pc_config.get('enc_depths', [2, 2, 2, 6, 2])}, channels={pc_config.get('enc_channels', [32, 64, 128, 256, 512])}")
                 print(f"   解码器: depths={pc_config.get('dec_depths', [2, 2, 2, 2])}, channels={pc_config.get('dec_channels', [64, 64, 128, 256])}")
                 print(f"   注意力: heads={pc_config.get('enc_num_head', [2, 4, 8, 16, 32])}, mlp_ratio={pc_config.get('mlp_ratio', 4)}")
@@ -1941,11 +2001,13 @@ class AdvancedTrainer:
                 
                 # 准备双模态输入数据
                 rgb_image = batch['rgb_image'].to(self.device)  # [B, 3, H, W]
-                coords = batch['coords']  # List[Tensor] - 点云坐标
-                grid_coords = batch['grid_coords']  # List[Tensor] - 网格坐标
-                offsets = batch['offsets']  # List[Tensor] - 偏移量
-                feats = batch['feats']  # List[Tensor] - 特征
-                pixel_coords = batch.get('pixel_coords', None)  # List[Tensor] - 像素坐标（可选）
+                coords = batch['coord'].to(self.device)  # List[Tensor] - 点云坐标
+                grid_coords = batch['grid_coord'].to(self.device)  # List[Tensor] - 网格坐标
+                offsets = batch['offset'].to(self.device)  # Tensor - 偏移量
+                feats = batch['feat'].to(self.device)  # Tensor - 特征
+                pixel_coords = batch.get('pixel_coords', None)  # Tensor - 像素坐标（可选）
+                if pixel_coords is not None:
+                    pixel_coords = pixel_coords.to(self.device)
                 
                 targets = {
                     'x': batch['x'].to(self.device),
@@ -2009,8 +2071,8 @@ class AdvancedTrainer:
                 except Exception as e:
                     if self.is_main_process:
                         print(f"  ❌ 生成过程中出错: {e}")
-                        print(f"  📊 输入图像形状: {rgbxyz.shape}")
-                        print(f"  📊 输入图像范围: [{rgbxyz.min().item():.4f}, {rgbxyz.max().item():.4f}]")
+                        print(f"  📊 输入图像形状: {rgb_image.shape}")
+                        print(f"  📊 输入图像范围: [{rgb_image.min().item():.4f}, {rgb_image.max().item():.4f}]")
                     continue
                 
                 # 计算生成指标
@@ -2390,6 +2452,7 @@ class AdvancedTrainer:
                         'train/classification_loss': train_stats.train_classification_loss,
                         'train/iou_loss': train_stats.train_iou_loss,
                         'train/delta_loss': train_stats.train_delta_loss,
+                        'train/eos_loss': train_stats.train_eos_loss,
                         'train/mean_iou': train_stats.train_mean_iou,
                         
                         # Teacher Forcing验证loss组件  
