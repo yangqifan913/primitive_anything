@@ -57,6 +57,7 @@ class TrainingStats:
     train_classification_loss: float
     train_iou_loss: float
     train_delta_loss: float
+    train_eos_loss: float
     train_mean_iou: float
     val_loss: float
     val_generation_loss: float
@@ -612,9 +613,10 @@ class AdvancedTrainer:
         
         # ===== 使用支持梯度的增量生成获取预测序列 =====
         # 生成完整的预测序列（保持梯度）
-        predicted_output = self._forward_with_gradient_preserving_generation(
-            model, rgbxyz, targets, seq_len, device
-        )
+        with torch.no_grad():
+            predicted_output = self._forward_with_gradient_preserving_generation(
+                model, rgbxyz, targets, seq_len, device
+            )
         
         # 从预测输出中提取连续值
         continuous_predictions = predicted_output['continuous_dict']
@@ -885,6 +887,7 @@ class AdvancedTrainer:
         total_cls_loss = 0.0
         total_iou_loss = 0.0
         total_delta_loss = 0.0
+        total_eos_loss = 0.0
         total_mean_iou = 0.0
         total_adaptive_cls_weight = 0.0
         total_adaptive_delta_weight = 0.0
@@ -943,6 +946,7 @@ class AdvancedTrainer:
             total_cls_loss += loss_dict['total_classification'].item()
             total_iou_loss += loss_dict['iou_loss'].item()
             total_delta_loss += loss_dict['total_delta'].item()
+            total_eos_loss += loss_dict.get('eos_loss', torch.tensor(0.0)).item()
             total_mean_iou += loss_dict['mean_iou'].item()
             total_adaptive_cls_weight += loss_dict.get('adaptive_classification_weight', torch.tensor(0.0)).item()
             total_adaptive_delta_weight += loss_dict.get('adaptive_delta_weight', torch.tensor(0.0)).item()
@@ -975,6 +979,7 @@ class AdvancedTrainer:
             train_classification_loss=total_cls_loss / num_batches,
             train_iou_loss=total_iou_loss / num_batches,
             train_delta_loss=total_delta_loss / num_batches,
+            train_eos_loss=total_eos_loss / num_batches,
             train_mean_iou=total_mean_iou / num_batches,
             val_loss=0.0,  # 稍后填充
             val_generation_loss=0.0,
@@ -2221,6 +2226,7 @@ class AdvancedTrainer:
                         'train/classification_loss': train_stats.train_classification_loss,
                         'train/iou_loss': train_stats.train_iou_loss,
                         'train/delta_loss': train_stats.train_delta_loss,
+                        'train/eos_loss': train_stats.train_eos_loss,
                         'train/mean_iou': train_stats.train_mean_iou,
                         
                         # Teacher Forcing验证loss组件  

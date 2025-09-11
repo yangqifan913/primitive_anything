@@ -195,16 +195,16 @@ data:
     
   # 3D坐标和尺寸范围
   continuous_ranges:
-    x: [0.5, 2.5]
-    y: [-2.0, 2.0] 
-    z: [-1.5, 1.5]
+    x: [0.5, 3.0]
+    y: [-2.5, 2.5] 
+    z: [-1.5, 0.5]
     w: [0.3, 0.7]
     h: [0.3, 0.7]
     l: [0.3, 0.7]
   
   # DataLoader设置
   dataloader:
-    batch_size: 4
+    batch_size: 16
     num_workers: 4
     pin_memory: true
     prefetch_factor: 2
