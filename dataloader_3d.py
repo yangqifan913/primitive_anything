@@ -13,6 +13,185 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 import random
+import math
+
+def quaternion_to_rotation_matrix(qx, qy, qz, qw):
+    """将四元数转换为旋转矩阵"""
+    import numpy as np
+    
+    # 归一化四元数
+    norm = np.sqrt(qx*qx + qy*qy + qz*qz + qw*qw)
+    qx, qy, qz, qw = qx/norm, qy/norm, qz/norm, qw/norm
+    
+    # 转换为旋转矩阵
+    R = np.array([
+        [1 - 2*(qy*qy + qz*qz), 2*(qx*qy - qw*qz), 2*(qx*qz + qw*qy)],
+        [2*(qx*qy + qw*qz), 1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qw*qx)],
+        [2*(qx*qz - qw*qy), 2*(qy*qz + qw*qx), 1 - 2*(qx*qx + qy*qy)]
+    ])
+    
+    return R
+
+def rotation_matrix_to_euler_scipy(R):
+    """使用scipy将旋转矩阵转换为欧拉角 (ZYX顺序)"""
+    from scipy.spatial.transform import Rotation as R_scipy
+    
+    # 使用scipy转换
+    r = R_scipy.from_matrix(R)
+    euler = r.as_euler('xyz', degrees=False)  # 返回 (roll, pitch, yaw)
+    
+    return euler[0], euler[1], euler[2]
+
+def apply_local_rotation_scipy(roll, pitch, yaw, axis, angle):
+    """
+    在局部坐标系中应用旋转 (使用scipy)
+    
+    Args:
+        roll, pitch, yaw: 当前欧拉角
+        axis: 旋转轴 ('x', 'y', 'z')
+        angle: 旋转角度（弧度）
+    
+    Returns:
+        new_roll, new_pitch, new_yaw: 新的欧拉角
+    """
+    from scipy.spatial.transform import Rotation as R_scipy
+    import numpy as np
+    
+    # 将欧拉角转换为旋转矩阵
+    r_original = R_scipy.from_euler('xyz', [roll, pitch, yaw])
+    R_original = r_original.as_matrix()
+    
+    # 创建局部旋转矩阵
+    if axis == 'x':
+        r_local = R_scipy.from_euler('x', angle)
+    elif axis == 'y':
+        r_local = R_scipy.from_euler('y', angle)
+    elif axis == 'z':
+        r_local = R_scipy.from_euler('z', angle)
+    else:
+        raise ValueError(f"Invalid axis: {axis}")
+    
+    R_local = r_local.as_matrix()
+    
+    # 应用局部旋转：R_new = R_original * R_local
+    R_new = R_original @ R_local
+    
+    # 转换回欧拉角
+    r_new = R_scipy.from_matrix(R_new)
+    euler_new = r_new.as_euler('xyz', degrees=False)
+    
+    return euler_new[0], euler_new[1], euler_new[2]
+
+def generate_equivalent_box_representations(x, y, z, l, w, h, roll, pitch, yaw):
+    """
+    生成box的所有等价表示
+    
+    正确的实现：通过尺寸排列的6种组合来表示相同的物理box
+    每种尺寸排列对应正确的坐标系转换后的欧拉角表示
+    
+    Args:
+        x, y, z: 位置坐标
+        l, w, h: 长度、宽度、高度
+        roll, pitch, yaw: 旋转角度（弧度）
+    
+    Returns:
+        List of equivalent boxes: [(x, y, z, l, w, h, roll, pitch, yaw), ...]
+    """
+    import math
+    
+    # 6种等价表示（通过不同的尺寸排列）
+    equivalent_boxes = []
+    
+    # 1. 原始表示: (l, w, h) + 原始角度
+    equivalent_boxes.append((x, y, z, l, w, h, roll, pitch, yaw))
+    
+    # 2. 尺寸排列 (l, h, w): 相当于绕length轴旋转90°
+    # length轴对应box的x轴，即世界坐标系的x轴
+    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'x', math.pi/2)
+    equivalent_boxes.append((x, y, z, l, h, w, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
+    
+    # 3. 尺寸排列 (h, w, l): 相当于绕width轴旋转90°
+    # width轴对应box的y轴，即世界坐标系的y轴
+    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'y', math.pi/2)
+    equivalent_boxes.append((x, y, z, h, w, l, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
+    
+    # 4. 尺寸排列 (w, l, h): 相当于绕height轴旋转90°
+    # height轴对应box的z轴，即世界坐标系的z轴
+    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'z', math.pi/2)
+    equivalent_boxes.append((x, y, z, w, l, h, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
+    
+    # 5. 尺寸排列 (h, l, w): 相当于绕length轴90° + 绕width轴90°
+    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'x', math.pi/2)
+    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(new_roll, new_pitch, new_yaw, 'y', math.pi/2)
+    equivalent_boxes.append((x, y, z, h, l, w, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
+    
+    # 6. 尺寸排列 (w, h, l): 相当于绕length轴90° + 绕height轴90°
+    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'x', math.pi/2)
+    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(new_roll, new_pitch, new_yaw, 'z', math.pi/2)
+    equivalent_boxes.append((x, y, z, w, h, l, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
+    
+    return equivalent_boxes
+
+def normalize_angle(angle):
+    """将角度归一化到[-π/2, π/2]范围"""
+    import math
+    while angle > math.pi/2:
+        angle -= math.pi
+    while angle < -math.pi/2:
+        angle += math.pi
+    return angle
+
+def quaternion_to_euler_angles(quaternion):
+    """
+    将四元数转换为欧拉角 (roll, pitch, yaw)
+    
+    Args:
+        quaternion: 四元数 [x, y, z, w] 或 (N, 4) 数组
+        
+    Returns:
+        euler_angles: 欧拉角 [roll, pitch, yaw] 或 (N, 3) 数组，单位为弧度
+    """
+    if quaternion.ndim == 1:
+        # 单个四元数
+        x, y, z, w = quaternion
+        
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (w * y - z * x)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp)  # use 90 degrees if out of range
+        else:
+            pitch = math.asin(sinp)
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        return np.array([roll, pitch, yaw])
+    else:
+        # 批量四元数
+        x, y, z, w = quaternion[:, 0], quaternion[:, 1], quaternion[:, 2], quaternion[:, 3]
+        
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        roll = np.arctan2(sinr_cosp, cosr_cosp)
+        
+        # Pitch (y-axis rotation)
+        sinp = 2 * (w * y - z * x)
+        pitch = np.arcsin(np.clip(sinp, -1, 1))  # 限制在[-1,1]范围内
+        
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = np.arctan2(siny_cosp, cosy_cosp)
+        
+        return np.column_stack([roll, pitch, yaw])
 
 def load_config(config_path: str = "data_config.yaml") -> Dict:
     """加载数据配置文件 - 已废弃，保留以防兼容性问题"""
@@ -81,6 +260,10 @@ class Box3DDataset(Dataset):
             self.continuous_range_w = continuous_ranges.get('w', [0.3, 0.7])
             self.continuous_range_h = continuous_ranges.get('h', [0.3, 0.7])
             self.continuous_range_l = continuous_ranges.get('l', [0.3, 0.7])
+            # 旋转范围
+            self.continuous_range_roll = continuous_ranges.get('roll', [-1.5708, 1.5708])
+            self.continuous_range_pitch = continuous_ranges.get('pitch', [-1.5708, 1.5708])
+            self.continuous_range_yaw = continuous_ranges.get('yaw', [-1.5708, 1.5708])
         else:
             # 使用默认值
             self.continuous_range_x = [0.5, 2.5]
@@ -89,6 +272,10 @@ class Box3DDataset(Dataset):
             self.continuous_range_w = [0.3, 0.7]
             self.continuous_range_h = [0.3, 0.7]
             self.continuous_range_l = [0.3, 0.7]
+            # 旋转范围默认值
+            self.continuous_range_roll = [-1.5708, 1.5708]
+            self.continuous_range_pitch = [-1.5708, 1.5708]
+            self.continuous_range_yaw = [-1.5708, 1.5708]
         
         # 打印配置信息
         if self.augment:
@@ -177,13 +364,13 @@ class Box3DDataset(Dataset):
             print(f"加载标注失败 {json_file}: {e}")
             return []
     
-    def _normalize_coordinates(self, boxes: List[Dict]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """提取box坐标和尺寸，进行范围裁剪，同时提取旋转信息（保持原始物理数值，不归一化）"""
+    def _normalize_coordinates(self, boxes: List[Dict]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """提取box坐标和尺寸，进行范围裁剪，同时将四元数旋转转换为欧拉角，并计算所有等价表示"""
         if not boxes:
             # 返回空数组
             return (np.array([]), np.array([]), np.array([]), 
                    np.array([]), np.array([]), np.array([]), 
-                   np.array([]).reshape(0, 4))  # 旋转四元数
+                   np.array([]), np.array([]), np.array([]))  # roll, pitch, yaw
         
         # 提取坐标、尺寸和旋转
         positions = np.array([box['position'] for box in boxes])  # (N, 3)
@@ -207,22 +394,45 @@ class Box3DDataset(Dataset):
         h_clipped = np.clip(h, self.continuous_range_h[0], self.continuous_range_h[1])
         l_clipped = np.clip(l, self.continuous_range_l[0], self.continuous_range_l[1])
         
-        return x_clipped, y_clipped, z_clipped, w_clipped, h_clipped, l_clipped, rotations
+        # 将四元数转换为欧拉角
+        euler_angles = quaternion_to_euler_angles(rotations)  # (N, 3) - [roll, pitch, yaw]
+        roll = euler_angles[:, 0]
+        pitch = euler_angles[:, 1]
+        yaw = euler_angles[:, 2]
+        
+        # 裁剪旋转角度到有效范围
+        roll_clipped = np.clip(roll, self.continuous_range_roll[0], self.continuous_range_roll[1])
+        pitch_clipped = np.clip(pitch, self.continuous_range_pitch[0], self.continuous_range_pitch[1])
+        yaw_clipped = np.clip(yaw, self.continuous_range_yaw[0], self.continuous_range_yaw[1])
+        
+        # 计算所有等价表示
+        all_equivalent_boxes = []
+        for i in range(len(x_clipped)):
+            equiv_boxes = generate_equivalent_box_representations(
+                x_clipped[i], y_clipped[i], z_clipped[i],
+                l_clipped[i], w_clipped[i], h_clipped[i],
+                roll_clipped[i], pitch_clipped[i], yaw_clipped[i]
+            )
+            all_equivalent_boxes.append(equiv_boxes)
+        
+        # 暂时返回原始表示，等价表示将在训练时使用
+        return x_clipped, y_clipped, z_clipped, w_clipped, h_clipped, l_clipped, roll_clipped, pitch_clipped, yaw_clipped
     
-    def _pad_sequences(self, x, y, z, w, h, l, rotations) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _pad_sequences(self, x, y, z, w, h, l, roll, pitch, yaw) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """将序列pad到固定长度"""
         current_len = len(x)
         
         if current_len == 0:
             # 如果没有box，返回全padding的tensor
-            identity_quat = np.array([0.0, 0.0, 0.0, 1.0])  # 单位四元数 (x,y,z,w)
             return (torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
-                   torch.from_numpy(np.tile(identity_quat, (self.max_boxes, 1))).float())
+                   torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
+                   torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
+                   torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32))
         
         if current_len > self.max_boxes:
             # 如果超过最大长度，随机采样
@@ -233,7 +443,9 @@ class Box3DDataset(Dataset):
             w = w[indices]
             h = h[indices]
             l = l[indices]
-            rotations = rotations[indices]
+            roll = roll[indices]
+            pitch = pitch[indices]
+            yaw = yaw[indices]
         else:
             # 如果不足最大长度，进行padding
             pad_len = self.max_boxes - current_len
@@ -244,10 +456,9 @@ class Box3DDataset(Dataset):
             h = np.concatenate([h, np.full(pad_len, self.pad_id)])
             l = np.concatenate([l, np.full(pad_len, self.pad_id)])
             
-            # 为旋转数据padding使用单位四元数
-            identity_quat = np.array([0.0, 0.0, 0.0, 1.0])  # 单位四元数 (x,y,z,w)
-            pad_rotations = np.tile(identity_quat, (pad_len, 1))
-            rotations = np.concatenate([rotations, pad_rotations], axis=0)
+            roll = np.concatenate([roll, np.full(pad_len, self.pad_id)])
+            pitch = np.concatenate([pitch, np.full(pad_len, self.pad_id)])
+            yaw = np.concatenate([yaw, np.full(pad_len, self.pad_id)])
         
         return (torch.from_numpy(x).float(),
                torch.from_numpy(y).float(),
@@ -255,7 +466,9 @@ class Box3DDataset(Dataset):
                torch.from_numpy(w).float(),
                torch.from_numpy(h).float(),
                torch.from_numpy(l).float(),
-               torch.from_numpy(rotations).float())
+               torch.from_numpy(roll).float(),
+               torch.from_numpy(pitch).float(),
+               torch.from_numpy(yaw).float())
     
     def _augment_data(self, rgbxyz: np.ndarray, boxes: List[Dict]) -> Tuple[np.ndarray, List[Dict]]:
         """数据增强 - 包括图像噪点和点云噪声"""
@@ -441,10 +654,18 @@ class Box3DDataset(Dataset):
         rgbxyz, boxes = self._augment_data(rgbxyz, boxes)
         
         # 归一化坐标并提取旋转信息
-        x, y, z, w, h, l, rotations = self._normalize_coordinates(boxes)
+        x, y, z, w, h, l, roll, pitch, yaw = self._normalize_coordinates(boxes)
+        
+        # 计算所有等价表示
+        equivalent_boxes = []
+        for i in range(len(x)):
+            equiv_boxes = generate_equivalent_box_representations(
+                x[i], y[i], z[i], l[i], w[i], h[i], roll[i], pitch[i], yaw[i]
+            )
+            equivalent_boxes.append(equiv_boxes)
         
         # Pad序列到固定长度
-        x_padded, y_padded, z_padded, w_padded, h_padded, l_padded, rotations_padded = self._pad_sequences(x, y, z, w, h, l, rotations)
+        x_padded, y_padded, z_padded, w_padded, h_padded, l_padded, roll_padded, pitch_padded, yaw_padded = self._pad_sequences(x, y, z, w, h, l, roll, pitch, yaw)
         
         # 转换图像格式：(H, W, 6) -> (6, H, W)
         rgbxyz_tensor = torch.from_numpy(rgbxyz).permute(2, 0, 1).float()
@@ -466,7 +687,10 @@ class Box3DDataset(Dataset):
             'w': w_padded,          # (max_boxes,)
             'h': h_padded,          # (max_boxes,)
             'l': l_padded,          # (max_boxes,)
-            'rotations': rotations_padded,  # (max_boxes, 4) - 四元数旋转
+            'roll': roll_padded,     # (max_boxes,) - 欧拉角旋转
+            'pitch': pitch_padded,   # (max_boxes,)
+            'yaw': yaw_padded,      # (max_boxes,)
+            'equivalent_boxes': equivalent_boxes,  # 等价表示列表
             'folder_name': sample['folder_name']  # 用于调试
         }
 

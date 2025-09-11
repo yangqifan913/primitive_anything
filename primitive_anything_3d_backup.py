@@ -702,104 +702,6 @@ class PrimitiveTransformer3D(nn.Module):
         else:
             raise ValueError(f"Unknown attribute: {attr_name}")
     
-    def predict_attribute_with_continuous_embed(self, step_embed, attr_name, prev_embeds=None, use_gumbel=None, temperature=1.0):
-        """预测属性并返回连续值和embedding - 支持可微分采样"""
-        # 构建输入
-        if prev_embeds is None:
-            input_embed = step_embed
-        else:
-            input_embed = torch.cat([step_embed] + prev_embeds, dim=-1)
-        
-        # 获取预测头和参数
-        if attr_name == 'x':
-            logits_head = self.to_x_logits
-            delta_head = self.to_x_delta
-            num_bins = self.num_discrete_x
-            value_range = self.continuous_range_x
-        elif attr_name == 'y':
-            logits_head = self.to_y_logits
-            delta_head = self.to_y_delta
-            num_bins = self.num_discrete_y
-            value_range = self.continuous_range_y
-        elif attr_name == 'z':
-            logits_head = self.to_z_logits
-            delta_head = self.to_z_delta
-            num_bins = self.num_discrete_z
-            value_range = self.continuous_range_z
-        elif attr_name == 'w':
-            logits_head = self.to_w_logits
-            delta_head = self.to_w_delta
-            num_bins = self.num_discrete_w
-            value_range = self.continuous_range_w
-        elif attr_name == 'h':
-            logits_head = self.to_h_logits
-            delta_head = self.to_h_delta
-            num_bins = self.num_discrete_h
-            value_range = self.continuous_range_h
-        elif attr_name == 'l':
-            logits_head = self.to_l_logits
-            delta_head = self.to_l_delta
-            num_bins = self.num_discrete_l
-            value_range = self.continuous_range_l
-        elif attr_name == 'roll':
-            logits_head = self.to_roll_logits
-            delta_head = self.to_roll_delta
-            num_bins = self.num_discrete_roll
-            value_range = self.continuous_range_roll
-        elif attr_name == 'pitch':
-            logits_head = self.to_pitch_logits
-            delta_head = self.to_pitch_delta
-            num_bins = self.num_discrete_pitch
-            value_range = self.continuous_range_pitch
-        elif attr_name == 'yaw':
-            logits_head = self.to_yaw_logits
-            delta_head = self.to_yaw_delta
-            num_bins = self.num_discrete_yaw
-            value_range = self.continuous_range_yaw
-        else:
-            raise ValueError(f"Unknown attribute: {attr_name}")
-        
-        # 预测
-        logits = logits_head(input_embed)
-        delta = torch.tanh(delta_head(input_embed).squeeze(-1)) * 0.5
-        
-        # 决定使用哪种采样方式
-        if use_gumbel is None:
-            use_gumbel = self.training  # 训练时使用Gumbel Softmax，推理时使用argmax
-        
-        if use_gumbel:
-            # 使用Gumbel Softmax进行可微分采样
-            continuous_base = self._differentiable_discrete_to_continuous(
-                logits, num_bins, value_range, temperature
-            )
-            # 用于返回的离散预测（不参与梯度传播）
-            discrete_pred = torch.argmax(logits, dim=-1)
-        else:
-            # 推理时使用argmax（不需要梯度）
-            discrete_pred = torch.argmax(logits, dim=-1)
-            continuous_base = self.continuous_from_discrete(discrete_pred, num_bins, value_range)
-        
-        # 加上delta修正 - 🔧 修复：delta应该按bin_width缩放
-        if use_gumbel:
-            # Gumbel Softmax情况下，需要计算等效的bin_width
-            min_val, max_val = value_range
-            bin_width = (max_val - min_val) / (num_bins - 1)
-            continuous_value = continuous_base + delta * bin_width
-        else:
-            # argmax情况下，同样使用bin_width缩放
-            min_val, max_val = value_range
-            bin_width = (max_val - min_val) / (num_bins - 1)
-            continuous_value = continuous_base + delta * bin_width
-        
-        # 确保数据类型一致性（针对混合精度训练）
-        if continuous_value.dtype != delta.dtype:
-            continuous_value = continuous_value.to(dtype=delta.dtype)
-        
-        # 获取embedding
-        embed = self.get_continuous_embed(attr_name, continuous_value)
-        
-        return logits, delta, continuous_value, embed
-    
     def predict_3d_vector_with_continuous_embed(self, step_embed, vector_type, prev_embeds=None, use_gumbel=None, temperature=1.0):
         """预测3D向量（位置/旋转/尺寸）并返回连续值和embedding"""
         # 构建输入
@@ -912,6 +814,104 @@ class PrimitiveTransformer3D(nn.Module):
             vector_embeds.append(attr_embed)
         
         return vector_logits, vector_deltas, vector_continuous, vector_embeds
+    
+    def predict_attribute_with_continuous_embed(self, step_embed, attr_name, prev_embeds=None, use_gumbel=None, temperature=1.0):
+        """预测属性并返回连续值和embedding - 支持可微分采样"""
+        # 构建输入
+        if prev_embeds is None:
+            input_embed = step_embed
+        else:
+            input_embed = torch.cat([step_embed] + prev_embeds, dim=-1)
+        
+        # 获取预测头和参数
+        if attr_name == 'x':
+            logits_head = self.to_x_logits
+            delta_head = self.to_x_delta
+            num_bins = self.num_discrete_x
+            value_range = self.continuous_range_x
+        elif attr_name == 'y':
+            logits_head = self.to_y_logits
+            delta_head = self.to_y_delta
+            num_bins = self.num_discrete_y
+            value_range = self.continuous_range_y
+        elif attr_name == 'z':
+            logits_head = self.to_z_logits
+            delta_head = self.to_z_delta
+            num_bins = self.num_discrete_z
+            value_range = self.continuous_range_z
+        elif attr_name == 'w':
+            logits_head = self.to_w_logits
+            delta_head = self.to_w_delta
+            num_bins = self.num_discrete_w
+            value_range = self.continuous_range_w
+        elif attr_name == 'h':
+            logits_head = self.to_h_logits
+            delta_head = self.to_h_delta
+            num_bins = self.num_discrete_h
+            value_range = self.continuous_range_h
+        elif attr_name == 'l':
+            logits_head = self.to_l_logits
+            delta_head = self.to_l_delta
+            num_bins = self.num_discrete_l
+            value_range = self.continuous_range_l
+        elif attr_name == 'roll':
+            logits_head = self.to_roll_logits
+            delta_head = self.to_roll_delta
+            num_bins = self.num_discrete_roll
+            value_range = self.continuous_range_roll
+        elif attr_name == 'pitch':
+            logits_head = self.to_pitch_logits
+            delta_head = self.to_pitch_delta
+            num_bins = self.num_discrete_pitch
+            value_range = self.continuous_range_pitch
+        elif attr_name == 'yaw':
+            logits_head = self.to_yaw_logits
+            delta_head = self.to_yaw_delta
+            num_bins = self.num_discrete_yaw
+            value_range = self.continuous_range_yaw
+        else:
+            raise ValueError(f"Unknown attribute: {attr_name}")
+        
+        # 预测
+        logits = logits_head(input_embed)
+        delta = torch.tanh(delta_head(input_embed).squeeze(-1)) * 0.5
+        
+        # 决定使用哪种采样方式
+        if use_gumbel is None:
+            use_gumbel = self.training  # 训练时使用Gumbel Softmax，推理时使用argmax
+        
+        if use_gumbel:
+            # 使用Gumbel Softmax进行可微分采样
+            continuous_base = self._differentiable_discrete_to_continuous(
+                logits, num_bins, value_range, temperature
+            )
+            # 用于返回的离散预测（不参与梯度传播）
+            discrete_pred = torch.argmax(logits, dim=-1)
+        else:
+            # 推理时使用argmax（不需要梯度）
+            discrete_pred = torch.argmax(logits, dim=-1)
+            continuous_base = self.continuous_from_discrete(discrete_pred, num_bins, value_range)
+        
+        # 加上delta修正 - 🔧 修复：delta应该按bin_width缩放
+        if use_gumbel:
+            # Gumbel Softmax情况下，需要计算等效的bin_width
+            min_val, max_val = value_range
+            bin_width = (max_val - min_val) / (num_bins - 1)
+            continuous_value = continuous_base + delta * bin_width
+        else:
+            # argmax情况下，同样使用bin_width缩放
+            min_val, max_val = value_range
+            bin_width = (max_val - min_val) / (num_bins - 1)
+            continuous_value = continuous_base + delta * bin_width
+        
+        # 确保数据类型一致性（针对混合精度训练）
+        if continuous_value.dtype != delta.dtype:
+            continuous_value = continuous_value.to(dtype=delta.dtype)
+        
+        # 获取embedding
+        embed = self.get_continuous_embed(attr_name, continuous_value)
+        
+        return logits, delta, continuous_value, embed
     
     def _differentiable_discrete_to_continuous(self, logits, num_bins, value_range, temperature=1.0):
         """使用Gumbel Softmax进行可微分的离散到连续转换 - 内存优化版本"""
@@ -1464,10 +1464,7 @@ class PrimitiveTransformer3D(nn.Module):
             'z': [[] for _ in range(batch_size)],
             'w': [[] for _ in range(batch_size)],
             'h': [[] for _ in range(batch_size)],
-            'l': [[] for _ in range(batch_size)],
-            'roll': [[] for _ in range(batch_size)],
-            'pitch': [[] for _ in range(batch_size)],
-            'yaw': [[] for _ in range(batch_size)]
+            'l': [[] for _ in range(batch_size)]
         }
         
         stopped_samples = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -1594,7 +1591,7 @@ class PrimitiveTransformer3D(nn.Module):
         
         next_embed = attended_codes[:, -1, :]
         
-        # 按新顺序预测：位置(3D) → 旋转(3D) → 尺寸(3D)
+        # 按新顺序预测各个属性：位置(3D) → 旋转(3D) → 尺寸(3D)
         box_prediction = {}
         prev_embeds = []
         
@@ -1619,7 +1616,7 @@ class PrimitiveTransformer3D(nn.Module):
         prev_embeds.extend(size_embeds)
         box_prediction.update(size_continuous)
         
-        # EOS预测（更新输入维度）
+        # EOS预测
         eos_logits = self.to_eos_logits(torch.cat([next_embed] + prev_embeds, dim=-1)).squeeze(-1)  # [B]
         eos_probs = torch.sigmoid(eos_logits)
         

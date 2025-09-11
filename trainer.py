@@ -33,7 +33,40 @@ except ImportError:
 from config_loader import ConfigLoader
 from primitive_anything_3d import PrimitiveTransformer3D
 from loss_3d import AdaptivePrimitiveTransformer3DLoss
-from dataloader_3d import create_dataloader
+from dataloader_3d import create_dataloader, generate_equivalent_box_representations, normalize_angle
+
+def select_best_equivalent_representation(pred_box, equivalent_boxes):
+    """
+    选择与预测box旋转L1 loss最小的等价表示
+    
+    Args:
+        pred_box: 预测box (x, y, z, l, w, h, roll, pitch, yaw)
+        equivalent_boxes: 等价表示列表 [(x, y, z, l, w, h, roll, pitch, yaw), ...]
+    
+    Returns:
+        best_box: 最优的等价表示
+        min_loss: 最小旋转loss
+    """
+    min_loss = float('inf')
+    best_box = equivalent_boxes[0]  # 默认选择第一个
+    
+    pred_roll, pred_pitch, pred_yaw = pred_box[6], pred_box[7], pred_box[8]
+    
+    for equiv_box in equivalent_boxes:
+        gt_roll, gt_pitch, gt_yaw = equiv_box[6], equiv_box[7], equiv_box[8]
+        
+        # 计算旋转L1 loss
+        roll_loss = abs(pred_roll - gt_roll)
+        pitch_loss = abs(pred_pitch - gt_pitch)
+        yaw_loss = abs(pred_yaw - gt_yaw)
+        
+        total_loss = roll_loss + pitch_loss + yaw_loss
+        
+        if total_loss < min_loss:
+            min_loss = total_loss
+            best_box = equiv_box
+    
+    return best_box, min_loss
 
 
 @dataclass
@@ -557,6 +590,77 @@ class AdvancedTrainer:
             focal_gamma=algorithm_config['focal']['gamma']
         )
     
+    def _prepare_targets_with_equivalent_boxes(self, batch, outputs):
+        """
+        使用等价表示优化目标数据，选择旋转L1 loss最小的表示
+        
+        Args:
+            batch: 输入batch数据
+            outputs: 模型输出
+            
+        Returns:
+            targets: 优化后的目标数据
+        """
+        batch_size = batch['x'].shape[0]
+        device = batch['x'].device
+        
+        # 初始化目标数据
+        targets = {
+            'x': batch['x'].to(device),
+            'y': batch['y'].to(device),
+            'z': batch['z'].to(device),
+            'w': batch['w'].to(device),
+            'h': batch['h'].to(device),
+            'l': batch['l'].to(device),
+            'roll': batch['roll'].to(device),
+            'pitch': batch['pitch'].to(device),
+            'yaw': batch['yaw'].to(device),
+        }
+        
+        # 如果有等价表示，进行优化
+        if 'equivalent_boxes' in batch:
+            equivalent_boxes = batch['equivalent_boxes']
+            
+            # 对每个样本的每个box进行优化
+            for b in range(batch_size):
+                for s in range(batch['x'].shape[1]):
+                    # 跳过padding
+                    if batch['x'][b, s] == self.pad_id:
+                        continue
+                    
+                    # 构建预测box
+                    pred_box = [
+                        outputs['continuous_dict']['x'][b, s].item(),
+                        outputs['continuous_dict']['y'][b, s].item(),
+                        outputs['continuous_dict']['z'][b, s].item(),
+                        outputs['continuous_dict']['l'][b, s].item(),
+                        outputs['continuous_dict']['w'][b, s].item(),
+                        outputs['continuous_dict']['h'][b, s].item(),
+                        outputs['continuous_dict']['roll'][b, s].item(),
+                        outputs['continuous_dict']['pitch'][b, s].item(),
+                        outputs['continuous_dict']['yaw'][b, s].item(),
+                    ]
+                    
+                    # 获取该box的等价表示
+                    if s < len(equivalent_boxes[b]):
+                        equiv_boxes = equivalent_boxes[b][s]
+                        
+                        # 选择最优的等价表示
+                        best_box, min_loss = select_best_equivalent_representation(pred_box, equiv_boxes)
+                        
+                        # 更新目标数据
+                        targets['x'][b, s] = best_box[0]
+                        targets['y'][b, s] = best_box[1]
+                        targets['z'][b, s] = best_box[2]
+                        targets['l'][b, s] = best_box[3]
+                        targets['w'][b, s] = best_box[4]
+                        targets['h'][b, s] = best_box[5]
+                        targets['roll'][b, s] = best_box[6]
+                        targets['pitch'][b, s] = best_box[7]
+                        targets['yaw'][b, s] = best_box[8]
+        
+        return targets
+    
     def _forward_with_sampling_strategy(self, batch: Dict, teacher_forcing_ratio: float) -> Dict:
         """根据采样策略进行前向传播
         
@@ -575,6 +679,9 @@ class AdvancedTrainer:
             'w': batch['w'].to(self.device),
             'h': batch['h'].to(self.device),
             'l': batch['l'].to(self.device),
+            'roll': batch['roll'].to(self.device),
+            'pitch': batch['pitch'].to(self.device),
+            'yaw': batch['yaw'].to(self.device),
         }
         
         # 获取模型
@@ -595,6 +702,9 @@ class AdvancedTrainer:
                 w=inputs['w'],
                 h=inputs['h'],
                 l=inputs['l'],
+                roll=inputs['roll'],
+                pitch=inputs['pitch'],
+                yaw=inputs['yaw'],
                 image=rgbxyz
             )
             return outputs
@@ -626,7 +736,7 @@ class AdvancedTrainer:
         
         # 构建混合输入序列（保持梯度）
         mixed_inputs = {}
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             continuous_pred = continuous_predictions[f'{attr}_continuous']  # [B, seq_len]
             # 确保维度匹配GT
             target_seq_len = targets[attr].shape[1]
@@ -674,6 +784,9 @@ class AdvancedTrainer:
             w=mixed_inputs['w'],
             h=mixed_inputs['h'],
             l=mixed_inputs['l'],
+            roll=targets['roll'],      # 添加旋转参数
+            pitch=targets['pitch'],    # 添加旋转参数
+            yaw=targets['yaw'],        # 添加旋转参数
             image=rgbxyz
         )
     
@@ -723,9 +836,9 @@ class AdvancedTrainer:
         gateloop_cache = []
         
         # 存储每一步的输出
-        all_logits = {f'{attr}_logits': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
-        all_deltas = {f'{attr}_delta': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
-        all_continuous = {f'{attr}_continuous': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
+        all_logits = {f'{attr}_logits': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
+        all_deltas = {f'{attr}_delta': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
+        all_continuous = {f'{attr}_continuous': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
         all_eos_logits = []
         
         # 4. 逐步生成，使用真正的增量解码
@@ -793,6 +906,11 @@ class AdvancedTrainer:
             h_logits, h_delta, h_continuous, h_embed = model.predict_attribute_with_continuous_embed(step_embed, 'h', prev_embeds=[x_embed, y_embed, z_embed, w_embed], use_gumbel=True, temperature=gumbel_temp)
             l_logits, l_delta, l_continuous, l_embed = model.predict_attribute_with_continuous_embed(step_embed, 'l', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed], use_gumbel=True, temperature=gumbel_temp)
             
+            # 预测旋转属性（roll, pitch, yaw）
+            roll_logits, roll_delta, roll_continuous, roll_embed = model.predict_attribute_with_continuous_embed(step_embed, 'roll', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed], use_gumbel=True, temperature=gumbel_temp)
+            pitch_logits, pitch_delta, pitch_continuous, pitch_embed = model.predict_attribute_with_continuous_embed(step_embed, 'pitch', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed], use_gumbel=True, temperature=gumbel_temp)
+            yaw_logits, yaw_delta, yaw_continuous, yaw_embed = model.predict_attribute_with_continuous_embed(step_embed, 'yaw', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed], use_gumbel=True, temperature=gumbel_temp)
+            
             # EOS预测
             eos_logits = model.to_eos_logits(step_embed).squeeze(-1)
             
@@ -803,6 +921,9 @@ class AdvancedTrainer:
             all_logits['w_logits'].append(w_logits)
             all_logits['h_logits'].append(h_logits)
             all_logits['l_logits'].append(l_logits)
+            all_logits['roll_logits'].append(roll_logits)
+            all_logits['pitch_logits'].append(pitch_logits)
+            all_logits['yaw_logits'].append(yaw_logits)
             
             all_deltas['x_delta'].append(x_delta)
             all_deltas['y_delta'].append(y_delta)
@@ -810,6 +931,9 @@ class AdvancedTrainer:
             all_deltas['w_delta'].append(w_delta)
             all_deltas['h_delta'].append(h_delta)
             all_deltas['l_delta'].append(l_delta)
+            all_deltas['roll_delta'].append(roll_delta)
+            all_deltas['pitch_delta'].append(pitch_delta)
+            all_deltas['yaw_delta'].append(yaw_delta)
             
             all_continuous['x_continuous'].append(x_continuous)
             all_continuous['y_continuous'].append(y_continuous)
@@ -817,6 +941,9 @@ class AdvancedTrainer:
             all_continuous['w_continuous'].append(w_continuous)
             all_continuous['h_continuous'].append(h_continuous)
             all_continuous['l_continuous'].append(l_continuous)
+            all_continuous['roll_continuous'].append(roll_continuous)
+            all_continuous['pitch_continuous'].append(pitch_continuous)
+            all_continuous['yaw_continuous'].append(yaw_continuous)
             
             all_eos_logits.append(eos_logits)
             
@@ -824,7 +951,8 @@ class AdvancedTrainer:
             # 这里需要创建新的embedding来加入到序列中
             next_embeds = []
             for attr, continuous_val in [('x', x_continuous), ('y', y_continuous), ('z', z_continuous), 
-                                       ('w', w_continuous), ('h', h_continuous), ('l', l_continuous)]:
+                                       ('w', w_continuous), ('h', h_continuous), ('l', l_continuous),
+                                       ('roll', roll_continuous), ('pitch', pitch_continuous), ('yaw', yaw_continuous)]:
                 # 获取对应的离散化参数
                 num_discrete = getattr(model, f'num_discrete_{attr}')
                 continuous_range = getattr(model, f'continuous_range_{attr}')
@@ -849,7 +977,7 @@ class AdvancedTrainer:
             'eos_logits': torch.stack(all_eos_logits, dim=1)  # [B, seq_len]
         }
         
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             result['logits_dict'][f'{attr}_logits'] = torch.stack(all_logits[f'{attr}_logits'], dim=1)
             result['delta_dict'][f'{attr}_delta'] = torch.stack(all_deltas[f'{attr}_delta'], dim=1)  
             result['continuous_dict'][f'{attr}_continuous'] = torch.stack(all_continuous[f'{attr}_continuous'], dim=1)
@@ -902,16 +1030,8 @@ class AdvancedTrainer:
                 # 前向传播
                 outputs = self._forward_with_sampling_strategy(batch, teacher_forcing_ratio)
                 
-                # 准备目标数据
-                targets = {
-                    'x': batch['x'].to(self.device),
-                    'y': batch['y'].to(self.device), 
-                    'z': batch['z'].to(self.device),
-                    'w': batch['w'].to(self.device),
-                    'h': batch['h'].to(self.device),
-                    'l': batch['l'].to(self.device),
-                    'rotations': batch['rotations'].to(self.device),
-                }
+                # 准备目标数据 - 使用等价表示优化
+                targets = self._prepare_targets_with_equivalent_boxes(batch, outputs)
                 
                 # 计算损失
                 sequence_lengths = self._compute_sequence_lengths(targets)
@@ -1037,7 +1157,9 @@ class AdvancedTrainer:
                     'w': batch['w'].to(self.device),
                     'h': batch['h'].to(self.device),
                     'l': batch['l'].to(self.device),
-                    'rotations': batch['rotations'].to(self.device),
+                    'roll': batch['roll'].to(self.device),
+                    'pitch': batch['pitch'].to(self.device),
+                    'yaw': batch['yaw'].to(self.device),
                 }
                 
                 sequence_lengths = self._compute_sequence_lengths(targets)
@@ -1233,12 +1355,16 @@ class AdvancedTrainer:
                             gt_boxes.append(gt_box)
                             
                             # GT旋转（如果可用）
-                            if 'rotations' in targets:
-                                gt_rot = targets['rotations'][b, s].cpu().numpy()  # [4] quaternion
+                            if 'roll' in targets and 'pitch' in targets and 'yaw' in targets:
+                                gt_rot = [
+                                    targets['roll'][b, s].cpu().item(),
+                                    targets['pitch'][b, s].cpu().item(),
+                                    targets['yaw'][b, s].cpu().item(),
+                                ]  # [3] euler angles
                                 gt_rotations.append(gt_rot)
                             else:
-                                # 使用单位四元数（无旋转）
-                                gt_rotations.append([0.0, 0.0, 0.0, 1.0])
+                                # 使用零旋转（无旋转）
+                                gt_rotations.append([0.0, 0.0, 0.0])
                 
                 # 计算该样本的IoU
                 if pred_boxes and gt_boxes:
@@ -1467,16 +1593,15 @@ class AdvancedTrainer:
                         gt_boxes.append(gt_box)
                         
                         # GT旋转信息
-                        if 'rotations' in targets:
+                        if 'roll' in targets and 'pitch' in targets and 'yaw' in targets:
                             gt_rot = [
-                                targets['rotations'][b, s, 0].cpu().item(),
-                                targets['rotations'][b, s, 1].cpu().item(),
-                                targets['rotations'][b, s, 2].cpu().item(),
-                                targets['rotations'][b, s, 3].cpu().item(),
-                            ]
+                                targets['roll'][b, s].cpu().item(),
+                                targets['pitch'][b, s].cpu().item(),
+                                targets['yaw'][b, s].cpu().item(),
+                            ]  # [3] euler angles
                             gt_rotations.append(gt_rot)
                         else:
-                            gt_rotations.append([0.0, 0.0, 0.0, 1.0])  # 单位四元数
+                            gt_rotations.append([0.0, 0.0, 0.0])  # 零旋转
                         
                         # 对应的预测box - 修复访问格式
                         pred_box = [
@@ -1800,7 +1925,9 @@ class AdvancedTrainer:
                     'w': batch['w'].to(self.device),
                     'h': batch['h'].to(self.device),
                     'l': batch['l'].to(self.device),
-                    'rotations': batch['rotations'].to(self.device),
+                    'roll': batch['roll'].to(self.device),
+                    'pitch': batch['pitch'].to(self.device),
+                    'yaw': batch['yaw'].to(self.device),
                 }
                 
                 # 使用训练好的模型进行生成
@@ -1887,7 +2014,9 @@ class AdvancedTrainer:
                         'w': targets['w'].cpu().tolist(),
                         'h': targets['h'].cpu().tolist(),
                         'l': targets['l'].cpu().tolist(),
-                        'rotations': targets['rotations'].cpu().tolist(),
+                        'roll': targets['roll'].cpu().tolist(),
+                        'pitch': targets['pitch'].cpu().tolist(),
+                        'yaw': targets['yaw'].cpu().tolist(),
                     },
                     'metrics': {
                         'iou': gen_metrics['iou'],

@@ -147,6 +147,10 @@ model:
     num_discrete_w: 64
     num_discrete_h: 64
     num_discrete_l: 64
+    # 旋转离散化参数
+    num_discrete_roll: 128
+    num_discrete_pitch: 128
+    num_discrete_yaw: 128
   
   # 嵌入维度
   embeddings:
@@ -201,6 +205,10 @@ data:
     w: [0.3, 0.7]
     h: [0.3, 0.7]
     l: [0.3, 0.7]
+    # 旋转连续范围（欧拉角，弧度）
+    roll: [-1.5708, 1.5708]      # [-π/2, π/2] = [-90°, 90°]
+    pitch: [-1.5708, 1.5708]     # [-π/2, π/2] = [-90°, 90°] 限制pitch范围避免万向锁
+    yaw: [-1.5708, 1.5708]      # [-π/2, π/2] = [-90°, 90°]
   
   # DataLoader设置
   dataloader:
