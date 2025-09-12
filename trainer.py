@@ -294,29 +294,20 @@ class AdvancedTrainer:
             raise ValueError("模型配置中缺少 'advanced' 部分")
         
         self.model = PrimitiveTransformer3D(
-            # 离散化参数
-            num_discrete_x=discretization['num_discrete_x'],
-            num_discrete_y=discretization['num_discrete_y'],
-            num_discrete_z=discretization['num_discrete_z'],
-            num_discrete_w=discretization['num_discrete_w'],
-            num_discrete_h=discretization['num_discrete_h'],
-            num_discrete_l=discretization['num_discrete_l'],
+            # 离散化参数 - 3个属性
+            num_discrete_position=discretization['num_discrete_position'],
+            num_discrete_rotation=discretization['num_discrete_rotation'],
+            num_discrete_size=discretization['num_discrete_size'],
             
-            # 连续范围
-            continuous_range_x=continuous_ranges['x'],
-            continuous_range_y=continuous_ranges['y'],
-            continuous_range_z=continuous_ranges['z'],
-            continuous_range_w=continuous_ranges['w'],
-            continuous_range_h=continuous_ranges['h'],
-            continuous_range_l=continuous_ranges['l'],
+            # 连续范围 - 3个属性
+            continuous_range_position=continuous_ranges['position'],
+            continuous_range_rotation=continuous_ranges['rotation'],
+            continuous_range_size=continuous_ranges['size'],
             
-            # 嵌入维度
-            dim_x_embed=embeddings['dim_x_embed'],
-            dim_y_embed=embeddings['dim_y_embed'],
-            dim_z_embed=embeddings['dim_z_embed'],
-            dim_w_embed=embeddings['dim_w_embed'],
-            dim_h_embed=embeddings['dim_h_embed'],
-            dim_l_embed=embeddings['dim_l_embed'],
+            # 嵌入维度 - 3个属性
+            dim_position_embed=embeddings['dim_position_embed'],
+            dim_rotation_embed=embeddings['dim_rotation_embed'],
+            dim_size_embed=embeddings['dim_size_embed'],
             
             # 模型参数
             max_primitive_len=global_config['max_seq_len'],
@@ -548,21 +539,15 @@ class AdvancedTrainer:
         data_processing = loss_config['data_processing']
         
         return AdaptivePrimitiveTransformer3DLoss(
-            # 离散化参数
-            num_discrete_x=discretization['num_discrete_x'],
-            num_discrete_y=discretization['num_discrete_y'],
-            num_discrete_z=discretization['num_discrete_z'],
-            num_discrete_w=discretization['num_discrete_w'],
-            num_discrete_h=discretization['num_discrete_h'],
-            num_discrete_l=discretization['num_discrete_l'],
+            # 离散化参数 - 3个属性
+            num_discrete_position=discretization['num_discrete_position'],
+            num_discrete_rotation=discretization['num_discrete_rotation'],
+            num_discrete_size=discretization['num_discrete_size'],
             
-            # 连续范围参数
-            continuous_range_x=tuple(continuous_ranges['x']),
-            continuous_range_y=tuple(continuous_ranges['y']),
-            continuous_range_z=tuple(continuous_ranges['z']),
-            continuous_range_w=tuple(continuous_ranges['w']),
-            continuous_range_h=tuple(continuous_ranges['h']),
-            continuous_range_l=tuple(continuous_ranges['l']),
+            # 连续范围参数 - 3个属性
+            continuous_range_position=continuous_ranges['position'],
+            continuous_range_rotation=continuous_ranges['rotation'],
+            continuous_range_size=continuous_ranges['size'],
             
             # 基础损失权重
             base_classification_weight=base_weights['classification'],
@@ -721,11 +706,20 @@ class AdvancedTrainer:
         seq_len = targets['x'].size(1)
         device = rgbxyz.device
         
-        # ===== 使用支持梯度的增量生成获取预测序列 =====
-        # 生成完整的预测序列（保持梯度）
+        # ===== 第一次推理：Teacher Forcing模式（不需要梯度） =====
+        # 使用Ground Truth作为输入，得到模型的预测结果
         with torch.no_grad():
-            predicted_output = self._forward_with_gradient_preserving_generation(
-                model, rgbxyz, targets, seq_len, device
+            predicted_output = model.forward_with_predictions(
+                x=targets['x'],
+                y=targets['y'],
+                z=targets['z'],
+                w=targets['w'],
+                h=targets['h'],
+                l=targets['l'],
+                roll=targets['roll'],
+                pitch=targets['pitch'],
+                yaw=targets['yaw'],
+                image=rgbxyz
             )
         
         # 从预测输出中提取连续值
@@ -1323,6 +1317,7 @@ class AdvancedTrainer:
             for b in range(batch_size):
                 # 构建预测的3D boxes
                 pred_boxes = []
+                pred_rotations = []
                 gt_boxes = []
                 gt_rotations = []
                 
@@ -1333,6 +1328,9 @@ class AdvancedTrainer:
                     if targets['x'][b, s].item() != -1.0:
                         # 将logits和delta转换为连续预测值
                         pred_box = []
+                        pred_rot = []
+                        
+                        # 位置和尺寸预测
                         for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
                             if attr + '_logits' in outputs['logits_dict'] and attr + '_delta' in outputs['delta_dict']:
                                 logits = outputs['logits_dict'][attr + '_logits'][b, s]  # [num_bins]
@@ -1340,17 +1338,26 @@ class AdvancedTrainer:
                                 continuous_val = self._get_continuous_prediction(logits, delta, attr)
                                 pred_box.append(continuous_val)
                         
-                        if len(pred_box) == 6:
+                        # 旋转预测
+                        for attr in ['roll', 'pitch', 'yaw']:
+                            if attr + '_logits' in outputs['logits_dict'] and attr + '_delta' in outputs['delta_dict']:
+                                logits = outputs['logits_dict'][attr + '_logits'][b, s]  # [num_bins]
+                                delta = outputs['delta_dict'][attr + '_delta'][b, s]     # scalar
+                                continuous_val = self._get_continuous_prediction(logits, delta, attr)
+                                pred_rot.append(continuous_val)
+                        
+                        if len(pred_box) == 6 and len(pred_rot) == 3:
                             pred_boxes.append(pred_box)
+                            pred_rotations.append(pred_rot)
                             
                             # 对应的GT box
                             gt_box = [
                                 targets['x'][b, s].cpu().item(),
                                 targets['y'][b, s].cpu().item(),
                                 targets['z'][b, s].cpu().item(),
+                                targets['l'][b, s].cpu().item(),
                                 targets['w'][b, s].cpu().item(),
                                 targets['h'][b, s].cpu().item(),
-                                targets['l'][b, s].cpu().item(),
                             ]
                             gt_boxes.append(gt_box)
                             
@@ -1371,10 +1378,10 @@ class AdvancedTrainer:
                     sample_ious = []
                     
                     # 计算每个预测box与对应GT box的IoU
-                    for i, (pred_box, gt_box, gt_rot) in enumerate(zip(pred_boxes, gt_boxes, gt_rotations)):
+                    for i, (pred_box, pred_rot, gt_box, gt_rot) in enumerate(zip(pred_boxes, pred_rotations, gt_boxes, gt_rotations)):
                         try:
-                            # 使用AABB IoU计算
-                            iou = self._compute_box_iou(pred_box, gt_box, gt_rot)
+                            # 使用OBB IoU计算
+                            iou = self._compute_box_iou(pred_box, gt_box, pred_rot, gt_rot)
                             sample_ious.append(iou)
                             
                         except Exception as e:
@@ -1405,18 +1412,12 @@ class AdvancedTrainer:
         """将分类logits和delta组合成连续预测值"""
         # 获取属性的配置（从ConfigLoader返回的平铺结构中获取）
         attr_configs = {
-            'x': (self.model_config.get('num_discrete_x', 128), 
-                  self.model_config.get('continuous_range_x', [0.5, 2.5])),
-            'y': (self.model_config.get('num_discrete_y', 128), 
-                  self.model_config.get('continuous_range_y', [-2.0, 2.0])),
-            'z': (self.model_config.get('num_discrete_z', 128), 
-                  self.model_config.get('continuous_range_z', [-1.5, 1.5])),
-            'w': (self.model_config.get('num_discrete_w', 64), 
-                  self.model_config.get('continuous_range_w', [0.1, 1.0])),
-            'h': (self.model_config.get('num_discrete_h', 64), 
-                  self.model_config.get('continuous_range_h', [0.1, 1.0])),
-            'l': (self.model_config.get('num_discrete_l', 64), 
-                  self.model_config.get('continuous_range_l', [0.1, 1.0]))
+            'position': (self.model_config.get('num_discrete_position', 64), 
+                        self.model_config.get('continuous_range_position', [[0.5, 2.5], [-2.0, 2.0], [-1.5, 1.5]])),
+            'rotation': (self.model_config.get('num_discrete_rotation', 64), 
+                        self.model_config.get('continuous_range_rotation', [[-1.5708, 1.5708], [-1.5708, 1.5708], [-1.5708, 1.5708]])),
+            'size': (self.model_config.get('num_discrete_size', 64), 
+                    self.model_config.get('continuous_range_size', [[0.1, 1.0], [0.1, 1.0], [0.1, 1.0]]))
         }
         
         num_bins, value_range = attr_configs[attr]
@@ -1570,6 +1571,7 @@ class AdvancedTrainer:
             for b in range(batch_size):
                 # 构建预测boxes和GT boxes的一对一匹配
                 pred_boxes = []
+                pred_rotations = []
                 gt_boxes = []
                 gt_rotations = []
                 
@@ -1586,9 +1588,9 @@ class AdvancedTrainer:
                             targets['x'][b, s].cpu().item(),
                             targets['y'][b, s].cpu().item(),
                             targets['z'][b, s].cpu().item(),
+                            targets['l'][b, s].cpu().item(),
                             targets['w'][b, s].cpu().item(),
                             targets['h'][b, s].cpu().item(),
-                            targets['l'][b, s].cpu().item(),
                         ]
                         gt_boxes.append(gt_box)
                         
@@ -1608,21 +1610,32 @@ class AdvancedTrainer:
                             float(gen_results['x'][b, s]),
                             float(gen_results['y'][b, s]),
                             float(gen_results['z'][b, s]),
+                            float(gen_results['l'][b, s]),
                             float(gen_results['w'][b, s]),
                             float(gen_results['h'][b, s]),
-                            float(gen_results['l'][b, s]),
                         ]
                         pred_boxes.append(pred_box)
+                        
+                        # 预测旋转信息
+                        if 'roll' in gen_results and 'pitch' in gen_results and 'yaw' in gen_results:
+                            pred_rot = [
+                                float(gen_results['roll'][b, s]),
+                                float(gen_results['pitch'][b, s]),
+                                float(gen_results['yaw'][b, s]),
+                            ]  # [3] euler angles
+                            pred_rotations.append(pred_rot)
+                        else:
+                            pred_rotations.append([0.0, 0.0, 0.0])  # 零旋转
                 
                 # 计算该样本的IoU（一对一匹配）
                 if pred_boxes and gt_boxes:
                     sample_ious = []
                     
                     # 计算每个预测box与对应GT box的IoU
-                    for i, (pred_box, gt_box, gt_rot) in enumerate(zip(pred_boxes, gt_boxes, gt_rotations)):
+                    for i, (pred_box, pred_rot, gt_box, gt_rot) in enumerate(zip(pred_boxes, pred_rotations, gt_boxes, gt_rotations)):
                         try:
-                            # 使用AABB IoU计算
-                            iou = self._compute_box_iou(pred_box, gt_box, gt_rot)
+                            # 使用OBB IoU计算
+                            iou = self._compute_box_iou(pred_box, gt_box, pred_rot, gt_rot)
                             sample_ious.append(iou)
                             
                         except Exception as e:
@@ -1651,17 +1664,26 @@ class AdvancedTrainer:
     
     def _compute_box_iou(self, box1: List[float], box2: List[float], rot1: List[float] = None, rot2: List[float] = None) -> float:
         """
-        计算两个3D box的IoU，统一使用AABB计算
+        计算两个3D box的IoU，使用OBB（有向包围盒）计算
         Args:
-            box1: [x, y, z, w, h, l] - 第一个box的中心坐标和尺寸
-            box2: [x, y, z, w, h, l] - 第二个box的中心坐标和尺寸 
-            rot1: [qx, qy, qz, qw] - 第一个box的四元数旋转（忽略）
-            rot2: [qx, qy, qz, qw] - 第二个box的四元数旋转（忽略）
+            box1: [x, y, z, l, w, h] - 第一个box的中心坐标和尺寸
+            box2: [x, y, z, l, w, h] - 第二个box的中心坐标和尺寸 
+            rot1: [roll, pitch, yaw] - 第一个box的欧拉角旋转（弧度）
+            rot2: [roll, pitch, yaw] - 第二个box的欧拉角旋转（弧度）
         Returns:
             IoU值 (0.0-1.0)
         """
-        # 直接使用AABB IoU计算，忽略旋转信息
-        return self._compute_simple_aabb_iou(box1, box2)
+        try:
+            # 如果没有旋转信息，回退到AABB计算
+            if rot1 is None or rot2 is None:
+                return self._compute_simple_aabb_iou(box1, box2)
+            
+            # 使用OBB IoU计算
+            return self._compute_obb_iou(box1, box2, rot1, rot2)
+        except Exception as e:
+            print(f"⚠️  计算OBB IoU时出错: {e}")
+            # 出错时回退到AABB计算
+            return self._compute_simple_aabb_iou(box1, box2)
     
     def _compute_simple_aabb_iou(self, box1: List[float], box2: List[float]) -> float:
         """计算两个轴对齐box的IoU"""
@@ -1703,6 +1725,121 @@ class AdvancedTrainer:
         except Exception as e:
             print(f"轴对齐IoU计算出错: {e}")
             return 0.0
+    
+    def _compute_obb_iou(self, box1: List[float], box2: List[float], rot1: List[float], rot2: List[float]) -> float:
+        """
+        计算两个有向包围盒(OBB)的IoU
+        Args:
+            box1: [x, y, z, l, w, h] - 第一个box的中心坐标和尺寸
+            box2: [x, y, z, l, w, h] - 第二个box的中心坐标和尺寸 
+            rot1: [roll, pitch, yaw] - 第一个box的欧拉角旋转（弧度）
+            rot2: [roll, pitch, yaw] - 第二个box的欧拉角旋转（弧度）
+        Returns:
+            IoU值 (0.0-1.0)
+        """
+        try:
+            import numpy as np
+            from scipy.spatial.transform import Rotation
+            
+            # 确保输入格式正确
+            if len(box1) != 6 or len(box2) != 6 or len(rot1) != 3 or len(rot2) != 3:
+                print(f"⚠️  OBB输入格式错误: box1={len(box1)}, box2={len(box2)}, rot1={len(rot1)}, rot2={len(rot2)}")
+                return 0.0
+            
+            # 提取box参数
+            center1 = np.array(box1[:3])  # [x, y, z]
+            size1 = np.array(box1[3:])    # [l, w, h]
+            center2 = np.array(box2[:3])  # [x, y, z]
+            size2 = np.array(box2[3:])    # [l, w, h]
+            
+            # 创建旋转矩阵
+            rot_matrix1 = Rotation.from_euler('xyz', rot1).as_matrix()
+            rot_matrix2 = Rotation.from_euler('xyz', rot2).as_matrix()
+            
+            # 计算OBB的8个顶点
+            def get_obb_vertices(center, size, rot_matrix):
+                # 局部坐标系的8个顶点
+                half_size = size / 2
+                vertices_local = np.array([
+                    [-half_size[0], -half_size[1], -half_size[2]],
+                    [ half_size[0], -half_size[1], -half_size[2]],
+                    [ half_size[0],  half_size[1], -half_size[2]],
+                    [-half_size[0],  half_size[1], -half_size[2]],
+                    [-half_size[0], -half_size[1],  half_size[2]],
+                    [ half_size[0], -half_size[1],  half_size[2]],
+                    [ half_size[0],  half_size[1],  half_size[2]],
+                    [-half_size[0],  half_size[1],  half_size[2]]
+                ])
+                
+                # 旋转并平移到世界坐标系
+                vertices_world = vertices_local @ rot_matrix.T + center
+                return vertices_world
+            
+            vertices1 = get_obb_vertices(center1, size1, rot_matrix1)
+            vertices2 = get_obb_vertices(center2, size2, rot_matrix2)
+            
+            # 使用凸包计算交集体积
+            from scipy.spatial import ConvexHull
+            
+            # 计算两个OBB的凸包
+            try:
+                hull1 = ConvexHull(vertices1)
+                hull2 = ConvexHull(vertices2)
+                
+                # 计算体积
+                volume1 = hull1.volume
+                volume2 = hull2.volume
+                
+                # 计算交集体积（简化方法：使用AABB近似）
+                # 这里使用简化的方法，实际应用中可能需要更复杂的算法
+                return self._compute_obb_intersection_volume(vertices1, vertices2, volume1, volume2)
+                
+            except Exception as e:
+                print(f"⚠️  凸包计算出错: {e}")
+                # 回退到AABB计算
+                return self._compute_simple_aabb_iou(box1, box2)
+                
+        except Exception as e:
+            print(f"⚠️  OBB IoU计算出错: {e}")
+            # 回退到AABB计算
+            return self._compute_simple_aabb_iou(box1, box2)
+    
+    def _compute_obb_intersection_volume(self, vertices1: np.ndarray, vertices2: np.ndarray, volume1: float, volume2: float) -> float:
+        """
+        计算两个OBB的交集体积（简化实现）
+        """
+        try:
+            import numpy as np
+            
+            # 计算AABB包围盒
+            min1 = np.min(vertices1, axis=0)
+            max1 = np.max(vertices1, axis=0)
+            min2 = np.min(vertices2, axis=0)
+            max2 = np.max(vertices2, axis=0)
+            
+            # 计算交集AABB
+            inter_min = np.maximum(min1, min2)
+            inter_max = np.minimum(max1, max2)
+            
+            # 检查是否有交集
+            if np.any(inter_min >= inter_max):
+                return 0.0
+            
+            # 计算交集体积
+            inter_volume = np.prod(inter_max - inter_min)
+            
+            # 计算IoU
+            union_volume = volume1 + volume2 - inter_volume
+            if union_volume <= 0:
+                return 0.0
+            
+            iou = inter_volume / union_volume
+            return max(0.0, min(1.0, iou))
+            
+        except Exception as e:
+            print(f"⚠️  交集体积计算出错: {e}")
+            return 0.0
+    
     
     def _quaternion_to_rotation_matrix(self, quat: List[float]) -> np.ndarray:
         """将四元数转换为旋转矩阵"""
@@ -2312,7 +2449,7 @@ class AdvancedTrainer:
             phase_start_epoch = sum(p.epochs for p in self.training_phases[:phase_idx])
             
             for epoch_in_phase in range(phase.epochs):
-                if self.current_epoch < phase_start_epoch + epoch_in_phase:
+                if self.current_epoch > phase_start_epoch + epoch_in_phase:
                     continue  # 跳过已训练的epoch
                 
                 # 🔧 修复：计算正确的阶段内epoch位置

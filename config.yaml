@@ -139,27 +139,17 @@ model:
     # use_rotary_emb: true
     # rotary_emb_dim: 32
   
-  # 离散化配置
+  # 离散化配置 - 3个属性
   discretization:
-    num_discrete_x: 128
-    num_discrete_y: 128
-    num_discrete_z: 128
-    num_discrete_w: 64
-    num_discrete_h: 64
-    num_discrete_l: 64
-    # 旋转离散化参数
-    num_discrete_roll: 128
-    num_discrete_pitch: 128
-    num_discrete_yaw: 128
+    num_discrete_position: 64  # 位置属性 (x, y, z)
+    num_discrete_rotation: 64  # 旋转属性 (roll, pitch, yaw)
+    num_discrete_size: 64     # 尺寸属性 (w, h, l)
   
-  # 嵌入维度
+  # 嵌入维度 - 3个属性
   embeddings:
-    dim_x_embed: 64
-    dim_y_embed: 64
-    dim_z_embed: 64
-    dim_w_embed: 64
-    dim_h_embed: 64
-    dim_l_embed: 64
+    dim_position_embed: 64  # 位置属性embedding维度 (64*3)
+    dim_rotation_embed: 64  # 旋转属性embedding维度 (64*3)
+    dim_size_embed: 64     # 尺寸属性embedding维度 (32*3)
   
   # 条件化配置
   conditioning:
@@ -197,18 +187,11 @@ data:
   dataset:
     data_root: "sim_data_bak"
     
-  # 3D坐标和尺寸范围
+  # 3D属性范围 - 3个属性
   continuous_ranges:
-    x: [0.5, 3.0]
-    y: [-2.5, 2.5] 
-    z: [-1.5, 0.5]
-    w: [0.3, 0.7]
-    h: [0.3, 0.7]
-    l: [0.3, 0.7]
-    # 旋转连续范围（欧拉角，弧度）
-    roll: [-1.5708, 1.5708]      # [-π/2, π/2] = [-90°, 90°]
-    pitch: [-1.5708, 1.5708]     # [-π/2, π/2] = [-90°, 90°] 限制pitch范围避免万向锁
-    yaw: [-1.5708, 1.5708]      # [-π/2, π/2] = [-90°, 90°]
+    position: [[0.5, 3.0], [-2.5, 2.5], [-1.5, 0.5]]  # 位置属性 (x, y, z)
+    rotation: [[-90.0, 90.0], [-90.0, 90.0], [-90.0, 90.0]]  # 旋转属性 (roll, pitch, yaw) 角度
+    size: [[0.3, 0.7], [0.3, 0.7], [0.3, 0.7]]  # 尺寸属性 (l, w, h)
   
   # DataLoader设置
   dataloader:

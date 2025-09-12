@@ -23,14 +23,20 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
         num_discrete_w: int = 64,
         num_discrete_h: int = 64,
         num_discrete_l: int = 64,
+        num_discrete_roll: int = 64,  # 新增旋转
+        num_discrete_pitch: int = 64,
+        num_discrete_yaw: int = 64,
         
         # 连续范围参数
-                    continuous_range_x: Tuple[float, float] = (0.5, 2.5),
+        continuous_range_x: Tuple[float, float] = (0.5, 2.5),
         continuous_range_y: Tuple[float, float] = (-2, 2),
         continuous_range_z: Tuple[float, float] = (-1.5, 1.5),
         continuous_range_w: Tuple[float, float] = (0.3, 0.7),
         continuous_range_h: Tuple[float, float] = (0.3, 0.7),
         continuous_range_l: Tuple[float, float] = (0.3, 0.7),
+        continuous_range_roll: Tuple[float, float] = (-1.5708, 1.5708),  # 新增旋转范围（弧度）
+        continuous_range_pitch: Tuple[float, float] = (-1.5708, 1.5708),
+        continuous_range_yaw: Tuple[float, float] = (-1.5708, 1.5708),
         
         # 基础损失权重
         base_classification_weight: float = 1.0,
@@ -67,6 +73,9 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
         self.num_discrete_w = num_discrete_w
         self.num_discrete_h = num_discrete_h
         self.num_discrete_l = num_discrete_l
+        self.num_discrete_roll = num_discrete_roll  # 新增旋转
+        self.num_discrete_pitch = num_discrete_pitch
+        self.num_discrete_yaw = num_discrete_yaw
         
         self.continuous_range_x = continuous_range_x
         self.continuous_range_y = continuous_range_y
@@ -74,6 +83,9 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
         self.continuous_range_w = continuous_range_w
         self.continuous_range_h = continuous_range_h
         self.continuous_range_l = continuous_range_l
+        self.continuous_range_roll = continuous_range_roll  # 新增旋转范围
+        self.continuous_range_pitch = continuous_range_pitch
+        self.continuous_range_yaw = continuous_range_yaw
         
         # 基础权重
         self.base_classification_weight = base_classification_weight
@@ -611,6 +623,9 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
             ('w', self.num_discrete_w, self.continuous_range_w),
             ('h', self.num_discrete_h, self.continuous_range_h),
             ('l', self.num_discrete_l, self.continuous_range_l),
+            ('roll', self.num_discrete_roll, self.continuous_range_roll),  # 新增旋转
+            ('pitch', self.num_discrete_pitch, self.continuous_range_pitch),
+            ('yaw', self.num_discrete_yaw, self.continuous_range_yaw),
         ]
         
         for attr_name, num_bins, value_range in attributes:
@@ -707,6 +722,9 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
             ('w', self.num_discrete_w, self.continuous_range_w),
             ('h', self.num_discrete_h, self.continuous_range_h),
             ('l', self.num_discrete_l, self.continuous_range_l),
+            ('roll', self.num_discrete_roll, self.continuous_range_roll),  # 新增旋转
+            ('pitch', self.num_discrete_pitch, self.continuous_range_pitch),
+            ('yaw', self.num_discrete_yaw, self.continuous_range_yaw),
         ]
         
         for attr_name, num_bins, value_range in attributes:
@@ -877,7 +895,7 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
         # 获取目标序列长度
         target_seq_len = targets_dict['x'].shape[1]  # max_boxes = 15
         
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             logits = logits_dict[f'{attr}_logits']  # [B, seq_len, num_bins]
             pred_seq_len = logits.shape[1]
             
@@ -909,6 +927,9 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
             ('w', self.num_discrete_w, self.continuous_range_w),
             ('h', self.num_discrete_h, self.continuous_range_h),
             ('l', self.num_discrete_l, self.continuous_range_l),
+            ('roll', self.num_discrete_roll, self.continuous_range_roll),  # 新增旋转
+            ('pitch', self.num_discrete_pitch, self.continuous_range_pitch),
+            ('yaw', self.num_discrete_yaw, self.continuous_range_yaw),
         ]:
             discrete_pred = discrete_preds[f'{attr}_discrete']  # [B, 15] (已裁剪)
             continuous_base = self.continuous_from_discrete(discrete_pred, num_bins, value_range)

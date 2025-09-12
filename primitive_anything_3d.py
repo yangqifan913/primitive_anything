@@ -380,29 +380,20 @@ class PrimitiveTransformer3D(nn.Module):
     def __init__(
         self,
         *,
-        # 离散化参数 - 3D坐标
-        num_discrete_x = 128,
-        num_discrete_y = 128,
-        num_discrete_z = 128,  # 新增z坐标
-        num_discrete_w = 64,
-        num_discrete_h = 64,
-        num_discrete_l = 64,  # 新增length维度
+        # 离散化参数 - 3个属性
+        num_discrete_position = 64,  # 位置属性 (x, y, z)
+        num_discrete_rotation = 64,  # 旋转属性 (roll, pitch, yaw)
+        num_discrete_size = 64,     # 尺寸属性 (w, h, l)
         
-        # 连续范围 - 3D坐标
-        continuous_range_x = [0.5, 2.5],
-        continuous_range_y = [-2, 2],
-        continuous_range_z = [-1.5, 1.5],  # 新增z范围
-        continuous_range_w = [0.3, 0.7],
-        continuous_range_h = [0.3, 0.7],
-        continuous_range_l = [0.3, 0.7],  # 新增length范围
+        # 连续范围 - 3个属性
+        continuous_range_position = [[0.5, 2.5], [-2, 2], [-1.5, 1.5]],  # 位置属性 (x, y, z)
+        continuous_range_rotation = [[-1.5708, 1.5708], [-1.5708, 1.5708], [-1.5708, 1.5708]],  # 旋转属性 (roll, pitch, yaw)
+        continuous_range_size = [[0.3, 0.7], [0.3, 0.7], [0.3, 0.7]],  # 尺寸属性 (l, w, h)
         
-        # 嵌入维度 - 3D
-        dim_x_embed = 64,
-        dim_y_embed = 64,
-        dim_z_embed = 64,  # 新增z嵌入
-        dim_w_embed = 32,
-        dim_h_embed = 32,
-        dim_l_embed = 32,  # 新增length嵌入
+        # 嵌入维度 - 3个属性，每个属性3维
+        dim_position_embed = 64,  # 位置属性embedding维度 (64*3)
+        dim_rotation_embed = 64,  # 旋转属性embedding维度 (64*3)
+        dim_size_embed = 64,      # 尺寸属性embedding维度 (32*3)
         
         # 模型参数
         dim = 512,
@@ -429,31 +420,15 @@ class PrimitiveTransformer3D(nn.Module):
     ):
         super().__init__()
         
-        # 3D离散化参数
-        self.num_discrete_x = num_discrete_x
-        self.num_discrete_y = num_discrete_y
-        self.num_discrete_z = num_discrete_z  # 新增
-        self.num_discrete_w = num_discrete_w
-        self.num_discrete_h = num_discrete_h
-        self.num_discrete_l = num_discrete_l  # 新增
+        # 存储3个属性的参数
+        self.num_discrete_position = num_discrete_position  # 64
+        self.num_discrete_rotation = num_discrete_rotation  # 64
+        self.num_discrete_size = num_discrete_size          # 64
         
-        # 旋转离散化参数
-        self.num_discrete_roll = 128
-        self.num_discrete_pitch = 128
-        self.num_discrete_yaw = 128
+        self.continuous_range_position = continuous_range_position  # [[x_range], [y_range], [z_range]]
+        self.continuous_range_rotation = continuous_range_rotation  # [[roll_range], [pitch_range], [yaw_range]]
+        self.continuous_range_size = continuous_range_size          # [[w_range], [h_range], [l_range]]
         
-        # 3D连续范围
-        self.continuous_range_x = continuous_range_x
-        self.continuous_range_y = continuous_range_y
-        self.continuous_range_z = continuous_range_z  # 新增
-        self.continuous_range_w = continuous_range_w
-        self.continuous_range_h = continuous_range_h
-        self.continuous_range_l = continuous_range_l  # 新增
-        
-        # 旋转范围（欧拉角，弧度）
-        self.continuous_range_roll = [-math.pi, math.pi]
-        self.continuous_range_pitch = [-math.pi/2, math.pi/2]  # 限制pitch范围避免万向锁
-        self.continuous_range_yaw = [-math.pi, math.pi]
         
         # 其他参数
         self.shape_cond_with_cat = shape_cond_with_cat
@@ -490,35 +465,29 @@ class PrimitiveTransformer3D(nn.Module):
             pretrained=pretrained
         )
         
-        # 3D嵌入层
-        self.x_embed = nn.Embedding(num_discrete_x, dim_x_embed)
-        self.y_embed = nn.Embedding(num_discrete_y, dim_y_embed)
-        self.z_embed = nn.Embedding(num_discrete_z, dim_z_embed)  # 新增
-        self.w_embed = nn.Embedding(num_discrete_w, dim_w_embed)
-        self.h_embed = nn.Embedding(num_discrete_h, dim_h_embed)
-        self.l_embed = nn.Embedding(num_discrete_l, dim_l_embed)  # 新增
+        # 3个属性的嵌入层 - 每个属性都是3维向量
+        # 位置属性: 3维向量 (x, y, z)
+        self.position_embed = nn.Embedding(self.num_discrete_position, dim_position_embed)
         
-        # 旋转嵌入层
-        self.roll_embed = nn.Embedding(self.num_discrete_roll, dim_x_embed)  # 复用x的embedding维度
-        self.pitch_embed = nn.Embedding(self.num_discrete_pitch, dim_y_embed)  # 复用y的embedding维度
-        self.yaw_embed = nn.Embedding(self.num_discrete_yaw, dim_z_embed)  # 复用z的embedding维度
+        # 角度属性: 3维向量 (roll, pitch, yaw)
+        self.rotation_embed = nn.Embedding(self.num_discrete_rotation, dim_rotation_embed)
         
-        # 投影层 - 更新总维度（包含旋转）
-        total_embed_dim = dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_x_embed + dim_y_embed + dim_z_embed
+        # 尺寸属性: 3维向量 (w, h, l)
+        self.size_embed = nn.Embedding(self.num_discrete_size, dim_size_embed)
+        
+        # 投影层 - 3个属性的总维度
+        total_embed_dim = dim_position_embed + dim_rotation_embed + dim_size_embed
         self.project_in = nn.Linear(total_embed_dim, dim)
         
-        # 连续值到embedding的转换层（用于属性间依赖）
-        self.continuous_to_x_embed = nn.Linear(1, dim_x_embed)
-        self.continuous_to_y_embed = nn.Linear(1, dim_y_embed)
-        self.continuous_to_z_embed = nn.Linear(1, dim_z_embed)
-        self.continuous_to_w_embed = nn.Linear(1, dim_w_embed)
-        self.continuous_to_h_embed = nn.Linear(1, dim_h_embed)
-        self.continuous_to_l_embed = nn.Linear(1, dim_l_embed)
+        # 分组连续值到embedding的转换层（用于属性间依赖）
+        # 位置组：一次性输出3维embedding
+        self.continuous_to_position_embed = nn.Linear(3, dim_position_embed)
         
-        # 旋转连续值到embedding的转换层
-        self.continuous_to_roll_embed = nn.Linear(1, dim_x_embed)
-        self.continuous_to_pitch_embed = nn.Linear(1, dim_y_embed)
-        self.continuous_to_yaw_embed = nn.Linear(1, dim_z_embed)
+        # 角度组：一次性输出3维embedding
+        self.continuous_to_rotation_embed = nn.Linear(3, dim_rotation_embed)
+        
+        # 尺寸组：一次性输出3维embedding
+        self.continuous_to_size_embed = nn.Linear(3, dim_size_embed)
         
         # 解码器
         self.decoder = Decoder(
@@ -533,127 +502,53 @@ class PrimitiveTransformer3D(nn.Module):
             cross_attn_dim_context=image_encoder_dim,
         )
         
-        # 3D预测头 - 添加z坐标和length
-        self.to_x_logits = nn.Sequential(
+        # 位置组预测头 - 一次性输出3维位置 (x, y, z)
+        position_total_bins = self.num_discrete_position
+        self.to_position_logits = nn.Sequential(
             nn.Linear(dim, dim),
             nn.ReLU(),
-            nn.Linear(dim, num_discrete_x),
-        )
-
-        self.to_y_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, num_discrete_y),
+            nn.Linear(dim, position_total_bins),
         )
         
-        # 新增z坐标预测头
-        self.to_z_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, num_discrete_z),
-        )
-
-        self.to_w_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, num_discrete_w),
-        )
-
-        self.to_h_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, num_discrete_h),
-        )
-        
-        # 新增length预测头
-        self.to_l_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, num_discrete_l),
-        )
-        
-        # 3D Delta预测头
-        self.to_x_delta = nn.Sequential(
+        # 位置组Delta预测头
+        self.to_position_delta = nn.Sequential(
             nn.Linear(dim, dim),
             nn.ReLU(),
-            nn.Linear(dim, 1),
+            nn.Linear(dim, 3),  # 3维位置delta
         )
-        
-        self.to_y_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed, dim),
+        # 旋转组预测头 - 把位置作为输入，一次性输出3维旋转 (roll, pitch, yaw)
+        rotation_total_bins = self.num_discrete_rotation
+        self.to_rotation_logits = nn.Sequential(
+            nn.Linear(dim + dim_position_embed, dim),
             nn.ReLU(),
-            nn.Linear(dim, 1),
+            nn.Linear(dim, rotation_total_bins),
         )
         
-        # 新增z delta预测头
-        self.to_z_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed, dim),
+        # 旋转组Delta预测头
+        self.to_rotation_delta = nn.Sequential(
+            nn.Linear(dim + dim_position_embed, dim),
             nn.ReLU(),
-            nn.Linear(dim, 1),
+            nn.Linear(dim, 3),  # 3维旋转delta
         )
         
-        self.to_w_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed, dim),
+        # 尺寸组预测头 - 把位置+旋转作为输入，一次性输出3维尺寸 (w, h, l)
+        size_total_bins = self.num_discrete_size
+        self.to_size_logits = nn.Sequential(
+            nn.Linear(dim + dim_position_embed + dim_rotation_embed, dim),
             nn.ReLU(),
-            nn.Linear(dim, 1),
+            nn.Linear(dim, size_total_bins),
         )
         
-        self.to_h_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed, dim),
+        # 尺寸组Delta预测头
+        self.to_size_delta = nn.Sequential(
+            nn.Linear(dim + dim_position_embed + dim_rotation_embed, dim),
             nn.ReLU(),
-            nn.Linear(dim, 1),
+            nn.Linear(dim, 3),  # 3维尺寸delta
         )
         
-        # 新增length delta预测头
-        self.to_l_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, 1),
-        )
-        
-        # 旋转预测头 - 位置(3D) → 旋转(3D) → 尺寸(3D)
-        # Roll预测头
-        self.to_roll_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, self.num_discrete_roll),
-        )
-        
-        self.to_roll_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, 1),
-        )
-        
-        # Pitch预测头
-        self.to_pitch_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_x_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, self.num_discrete_pitch),
-        )
-        
-        self.to_pitch_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_x_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, 1),
-        )
-        
-        # Yaw预测头
-        self.to_yaw_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_x_embed + dim_y_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, self.num_discrete_yaw),
-        )
-        
-        self.to_yaw_delta = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_x_embed + dim_y_embed, dim),
-            nn.ReLU(),
-            nn.Linear(dim, 1),
-        )
-        
-        # EOS预测网络 - 更新输入维度（包含旋转）
+        # EOS预测网络 - 使用所有3个属性的embedding
         self.to_eos_logits = nn.Sequential(
-            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_x_embed + dim_y_embed + dim_z_embed, dim),
+            nn.Linear(dim + dim_position_embed + dim_rotation_embed + dim_size_embed, dim),
             nn.ReLU(),
             nn.Linear(dim, 1),
         )
@@ -674,134 +569,32 @@ class PrimitiveTransformer3D(nn.Module):
         return min_val + (discrete_values.float() / (num_bins - 1)) * (max_val - min_val)
     
     def get_continuous_embed(self, attr_name, continuous_value):
-        """从连续值获取embedding"""
-        # 将连续值reshape为[B, 1]或[B, seq_len, 1]
+        """从连续值获取embedding - 支持3个属性"""
+        # continuous_value应该是[B, 3]或[B, seq_len, 3]的形状
         if continuous_value.dim() == 1:
-            continuous_value = continuous_value.unsqueeze(-1)
+            continuous_value = continuous_value.unsqueeze(-1)  # [B] -> [B, 1]
         elif continuous_value.dim() == 2:
-            continuous_value = continuous_value.unsqueeze(-1)
+            if continuous_value.shape[-1] == 3:
+                pass  # [B, 3] 正确
+            else:
+                continuous_value = continuous_value.unsqueeze(-1)  # [B, seq_len] -> [B, seq_len, 1]
+        elif continuous_value.dim() == 3:
+            if continuous_value.shape[-1] == 3:
+                pass  # [B, seq_len, 3] 正确
+            else:
+                continuous_value = continuous_value.unsqueeze(-1)  # [B, seq_len, 1] -> [B, seq_len, 1]
         
-        if attr_name == 'x':
-            return self.continuous_to_x_embed(continuous_value)
-        elif attr_name == 'y':
-            return self.continuous_to_y_embed(continuous_value)
-        elif attr_name == 'z':
-            return self.continuous_to_z_embed(continuous_value)
-        elif attr_name == 'w':
-            return self.continuous_to_w_embed(continuous_value)
-        elif attr_name == 'h':
-            return self.continuous_to_h_embed(continuous_value)
-        elif attr_name == 'l':
-            return self.continuous_to_l_embed(continuous_value)
-        elif attr_name == 'roll':
-            return self.continuous_to_roll_embed(continuous_value)
-        elif attr_name == 'pitch':
-            return self.continuous_to_pitch_embed(continuous_value)
-        elif attr_name == 'yaw':
-            return self.continuous_to_yaw_embed(continuous_value)
+        if attr_name == 'position':
+            return self.continuous_to_position_embed(continuous_value)
+        elif attr_name == 'rotation':
+            return self.continuous_to_rotation_embed(continuous_value)
+        elif attr_name == 'size':
+            return self.continuous_to_size_embed(continuous_value)
         else:
-            raise ValueError(f"Unknown attribute: {attr_name}")
-    
-    def predict_attribute_with_continuous_embed(self, step_embed, attr_name, prev_embeds=None, use_gumbel=None, temperature=1.0):
-        """预测属性并返回连续值和embedding - 支持可微分采样"""
-        # 构建输入
-        if prev_embeds is None:
-            input_embed = step_embed
-        else:
-            input_embed = torch.cat([step_embed] + prev_embeds, dim=-1)
-        
-        # 获取预测头和参数
-        if attr_name == 'x':
-            logits_head = self.to_x_logits
-            delta_head = self.to_x_delta
-            num_bins = self.num_discrete_x
-            value_range = self.continuous_range_x
-        elif attr_name == 'y':
-            logits_head = self.to_y_logits
-            delta_head = self.to_y_delta
-            num_bins = self.num_discrete_y
-            value_range = self.continuous_range_y
-        elif attr_name == 'z':
-            logits_head = self.to_z_logits
-            delta_head = self.to_z_delta
-            num_bins = self.num_discrete_z
-            value_range = self.continuous_range_z
-        elif attr_name == 'w':
-            logits_head = self.to_w_logits
-            delta_head = self.to_w_delta
-            num_bins = self.num_discrete_w
-            value_range = self.continuous_range_w
-        elif attr_name == 'h':
-            logits_head = self.to_h_logits
-            delta_head = self.to_h_delta
-            num_bins = self.num_discrete_h
-            value_range = self.continuous_range_h
-        elif attr_name == 'l':
-            logits_head = self.to_l_logits
-            delta_head = self.to_l_delta
-            num_bins = self.num_discrete_l
-            value_range = self.continuous_range_l
-        elif attr_name == 'roll':
-            logits_head = self.to_roll_logits
-            delta_head = self.to_roll_delta
-            num_bins = self.num_discrete_roll
-            value_range = self.continuous_range_roll
-        elif attr_name == 'pitch':
-            logits_head = self.to_pitch_logits
-            delta_head = self.to_pitch_delta
-            num_bins = self.num_discrete_pitch
-            value_range = self.continuous_range_pitch
-        elif attr_name == 'yaw':
-            logits_head = self.to_yaw_logits
-            delta_head = self.to_yaw_delta
-            num_bins = self.num_discrete_yaw
-            value_range = self.continuous_range_yaw
-        else:
-            raise ValueError(f"Unknown attribute: {attr_name}")
-        
-        # 预测
-        logits = logits_head(input_embed)
-        delta = torch.tanh(delta_head(input_embed).squeeze(-1)) * 0.5
-        
-        # 决定使用哪种采样方式
-        if use_gumbel is None:
-            use_gumbel = self.training  # 训练时使用Gumbel Softmax，推理时使用argmax
-        
-        if use_gumbel:
-            # 使用Gumbel Softmax进行可微分采样
-            continuous_base = self._differentiable_discrete_to_continuous(
-                logits, num_bins, value_range, temperature
-            )
-            # 用于返回的离散预测（不参与梯度传播）
-            discrete_pred = torch.argmax(logits, dim=-1)
-        else:
-            # 推理时使用argmax（不需要梯度）
-            discrete_pred = torch.argmax(logits, dim=-1)
-            continuous_base = self.continuous_from_discrete(discrete_pred, num_bins, value_range)
-        
-        # 加上delta修正 - 🔧 修复：delta应该按bin_width缩放
-        if use_gumbel:
-            # Gumbel Softmax情况下，需要计算等效的bin_width
-            min_val, max_val = value_range
-            bin_width = (max_val - min_val) / (num_bins - 1)
-            continuous_value = continuous_base + delta * bin_width
-        else:
-            # argmax情况下，同样使用bin_width缩放
-            min_val, max_val = value_range
-            bin_width = (max_val - min_val) / (num_bins - 1)
-            continuous_value = continuous_base + delta * bin_width
-        
-        # 确保数据类型一致性（针对混合精度训练）
-        if continuous_value.dtype != delta.dtype:
-            continuous_value = continuous_value.to(dtype=delta.dtype)
-        
-        # 获取embedding
-        embed = self.get_continuous_embed(attr_name, continuous_value)
-        
-        return logits, delta, continuous_value, embed
+            raise ValueError(f"Unknown attribute: {attr_name}. Expected 'position', 'rotation', or 'size'")
     
     def predict_3d_vector_with_continuous_embed(self, step_embed, vector_type, prev_embeds=None, use_gumbel=None, temperature=1.0):
-        """预测3D向量（位置/旋转/尺寸）并返回连续值和embedding"""
+        """预测3D向量（位置/旋转/尺寸）并返回连续值和embedding - 3属性版本"""
         # 构建输入
         if prev_embeds is None:
             input_embed = step_embed
@@ -809,109 +602,85 @@ class PrimitiveTransformer3D(nn.Module):
             input_embed = torch.cat([step_embed] + prev_embeds, dim=-1)
         
         if vector_type == 'position':
-            # 位置向量: x, y, z
-            attrs = ['x', 'y', 'z']
+            # 位置属性: 一次性预测3维向量 (x, y, z)
+            logits_head = self.to_position_logits
+            delta_head = self.to_position_delta
+            num_bins_list = self.num_discrete_position
+            value_ranges = self.continuous_range_position
+            
         elif vector_type == 'rotation':
-            # 旋转向量: roll, pitch, yaw
-            attrs = ['roll', 'pitch', 'yaw']
+            # 旋转属性: 一次性预测3维向量 (roll, pitch, yaw)
+            logits_head = self.to_rotation_logits
+            delta_head = self.to_rotation_delta
+            num_bins_list = self.num_discrete_rotation
+            value_ranges = self.continuous_range_rotation
+            
         elif vector_type == 'size':
-            # 尺寸向量: w, h, l
-            attrs = ['w', 'h', 'l']
+            # 尺寸属性: 一次性预测3维向量 (w, h, l)
+            logits_head = self.to_size_logits
+            delta_head = self.to_size_delta
+            num_bins_list = self.num_discrete_size
+            value_ranges = self.continuous_range_size
+            
         else:
             raise ValueError(f"Unknown vector type: {vector_type}")
         
-        # 预测每个属性
-        vector_logits = {}
-        vector_deltas = {}
-        vector_continuous = {}
-        vector_embeds = []
+        # 一次性预测所有logits
+        all_logits = logits_head(input_embed)  # [B, sum(num_bins)]
+        all_deltas = delta_head(input_embed)   # [B, 3]
         
-        for i, attr in enumerate(attrs):
-            # 构建当前属性的输入embedding
-            current_prev_embeds = prev_embeds + vector_embeds if prev_embeds else vector_embeds
-            current_input_embed = torch.cat([step_embed] + current_prev_embeds, dim=-1) if current_prev_embeds else step_embed
+        # 决定使用哪种采样方式
+        if use_gumbel is None:
+            use_gumbel = self.training
+        
+        # 处理每个维度
+        continuous_values = []
+        discrete_values = []
+        
+        start_idx = 0
+        for i in range(3):  # 3个维度
+            num_bins = num_bins_list  # 现在所有维度使用相同的离散化参数
+            value_range = value_ranges[i]
             
-            # 获取预测头和参数
-            if attr == 'x':
-                logits_head = self.to_x_logits
-                delta_head = self.to_x_delta
-                num_bins = self.num_discrete_x
-                value_range = self.continuous_range_x
-            elif attr == 'y':
-                logits_head = self.to_y_logits
-                delta_head = self.to_y_delta
-                num_bins = self.num_discrete_y
-                value_range = self.continuous_range_y
-            elif attr == 'z':
-                logits_head = self.to_z_logits
-                delta_head = self.to_z_delta
-                num_bins = self.num_discrete_z
-                value_range = self.continuous_range_z
-            elif attr == 'w':
-                logits_head = self.to_w_logits
-                delta_head = self.to_w_delta
-                num_bins = self.num_discrete_w
-                value_range = self.continuous_range_w
-            elif attr == 'h':
-                logits_head = self.to_h_logits
-                delta_head = self.to_h_delta
-                num_bins = self.num_discrete_h
-                value_range = self.continuous_range_h
-            elif attr == 'l':
-                logits_head = self.to_l_logits
-                delta_head = self.to_l_delta
-                num_bins = self.num_discrete_l
-                value_range = self.continuous_range_l
-            elif attr == 'roll':
-                logits_head = self.to_roll_logits
-                delta_head = self.to_roll_delta
-                num_bins = self.num_discrete_roll
-                value_range = self.continuous_range_roll
-            elif attr == 'pitch':
-                logits_head = self.to_pitch_logits
-                delta_head = self.to_pitch_delta
-                num_bins = self.num_discrete_pitch
-                value_range = self.continuous_range_pitch
-            elif attr == 'yaw':
-                logits_head = self.to_yaw_logits
-                delta_head = self.to_yaw_delta
-                num_bins = self.num_discrete_yaw
-                value_range = self.continuous_range_yaw
-            else:
-                raise ValueError(f"Unknown attribute: {attr}")
-            
-            # 预测
-            logits = logits_head(current_input_embed)
-            delta = torch.tanh(delta_head(current_input_embed).squeeze(-1)) * 0.5
-            
-            # 决定使用哪种采样方式
-            if use_gumbel is None:
-                use_gumbel = self.training
+            # 提取当前维度的logits和delta
+            dim_logits = all_logits[:, start_idx:start_idx + num_bins]
+            dim_delta = torch.tanh(all_deltas[:, i]) * 0.5
             
             if use_gumbel:
                 # Gumbel Softmax采样（训练时）
-                gumbel_logits = logits + self._sample_gumbel(logits.shape, logits.device)
+                gumbel_logits = dim_logits + self._sample_gumbel(dim_logits.shape, dim_logits.device)
                 probs = F.softmax(gumbel_logits / temperature, dim=-1)
-                discrete = torch.sum(probs * torch.arange(num_bins, device=logits.device).float(), dim=-1)
+                discrete = torch.sum(probs * torch.arange(num_bins, device=dim_logits.device).float(), dim=-1)
             else:
                 # 确定性采样（推理时）
-                discrete = torch.argmax(logits, dim=-1)
+                discrete = torch.argmax(dim_logits, dim=-1)
             
             # 计算连续值
             continuous_base = self.continuous_from_discrete(discrete, num_bins, value_range)
-            continuous_value = continuous_base + delta
+            continuous_value = continuous_base + dim_delta
             continuous_value = continuous_value.clamp(value_range[0], value_range[1])
             
-            # 获取embedding
-            attr_embed = self.continuous_to_embed(continuous_value, attr)
+            continuous_values.append(continuous_value)
+            discrete_values.append(discrete)
             
-            # 保存结果
-            vector_logits[f'{attr}_logits'] = logits
-            vector_deltas[f'{attr}_delta'] = delta
-            vector_continuous[f'{attr}_continuous'] = continuous_value
-            vector_embeds.append(attr_embed)
+            start_idx += num_bins
         
-        return vector_logits, vector_deltas, vector_continuous, vector_embeds
+        # 组合成3维向量
+        continuous_vector = torch.stack(continuous_values, dim=-1)  # [B, 3]
+        discrete_vector = torch.stack(discrete_values, dim=-1)      # [B, 3]
+        
+        # 获取embedding
+        attr_embed = self.get_continuous_embed(vector_type, continuous_vector)
+        
+        return {
+            'logits': all_logits,
+            'deltas': all_deltas,
+            'continuous': continuous_vector,
+            'discrete': discrete_vector,
+            'embed': attr_embed
+        }
+    
+    
     
     def _differentiable_discrete_to_continuous(self, logits, num_bins, value_range, temperature=1.0):
         """使用Gumbel Softmax进行可微分的离散到连续转换 - 内存优化版本"""
@@ -973,48 +742,60 @@ class PrimitiveTransformer3D(nn.Module):
         continuous = discrete.float() / (num_discrete - 1) * (max_val - min_val) + min_val
         return continuous
     
-    def encode_primitive(self, x, y, z, w, h, l, roll, pitch, yaw, primitive_mask):
-        """编码3D基本体参数（包含旋转）"""
+    def encode_primitive(self, position, rotation, size, primitive_mask):
+        """编码3D基本体参数（包含旋转）- 使用3属性结构"""
         # 检查是否有有效的框
-        if x.numel() == 0 or y.numel() == 0 or z.numel() == 0 or w.numel() == 0 or h.numel() == 0 or l.numel() == 0 or roll.numel() == 0 or pitch.numel() == 0 or yaw.numel() == 0:
-            batch_size = x.shape[0] if x.numel() > 0 else 1
+        if position.numel() == 0 or rotation.numel() == 0 or size.numel() == 0:
+            batch_size = position.shape[0] if position.numel() > 0 else 1
             dim = self.project_in.out_features
-            empty_embed = torch.zeros(batch_size, 0, dim, device=x.device)
-            empty_discrete = (torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
-                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device))
+            empty_embed = torch.zeros(batch_size, 0, dim, device=position.device)
+            empty_discrete = (torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=position.device))
             return empty_embed, empty_discrete
         
-        # 3D离散化（包含旋转）
-        discrete_x = self.discretize(x, self.num_discrete_x, self.continuous_range_x)
-        discrete_y = self.discretize(y, self.num_discrete_y, self.continuous_range_y)
-        discrete_z = self.discretize(z, self.num_discrete_z, self.continuous_range_z)  # 新增
-        discrete_w = self.discretize(w, self.num_discrete_w, self.continuous_range_w)
-        discrete_h = self.discretize(h, self.num_discrete_h, self.continuous_range_h)
-        discrete_l = self.discretize(l, self.num_discrete_l, self.continuous_range_l)  # 新增
-        discrete_roll = self.discretize(roll, self.num_discrete_roll, self.continuous_range_roll)  # 新增旋转
-        discrete_pitch = self.discretize(pitch, self.num_discrete_pitch, self.continuous_range_pitch)
-        discrete_yaw = self.discretize(yaw, self.num_discrete_yaw, self.continuous_range_yaw)
+        # 分离各个属性
+        x, y, z = position[:, :, 0], position[:, :, 1], position[:, :, 2]
+        roll, pitch, yaw = rotation[:, :, 0], rotation[:, :, 1], rotation[:, :, 2]
+        l, w, h = size[:, :, 0], size[:, :, 1], size[:, :, 2]
         
-        # 3D嵌入（包含旋转）
-        x_embed = self.x_embed(discrete_x)
-        y_embed = self.y_embed(discrete_y)
-        z_embed = self.z_embed(discrete_z)  # 新增
-        w_embed = self.w_embed(discrete_w)
-        h_embed = self.h_embed(discrete_h)
-        l_embed = self.l_embed(discrete_l)  # 新增
-        roll_embed = self.roll_embed(discrete_roll)  # 新增旋转
-        pitch_embed = self.pitch_embed(discrete_pitch)
-        yaw_embed = self.yaw_embed(discrete_yaw)
+        # 3D离散化（包含旋转）- 使用3属性结构
+        # 位置属性
+        discrete_x = self.discretize(x, self.num_discrete_position, self.continuous_range_position[0])
+        discrete_y = self.discretize(y, self.num_discrete_position, self.continuous_range_position[1])
+        discrete_z = self.discretize(z, self.num_discrete_position, self.continuous_range_position[2])
+        
+        # 旋转属性
+        discrete_roll = self.discretize(roll, self.num_discrete_rotation, self.continuous_range_rotation[0])
+        discrete_pitch = self.discretize(pitch, self.num_discrete_rotation, self.continuous_range_rotation[1])
+        discrete_yaw = self.discretize(yaw, self.num_discrete_rotation, self.continuous_range_rotation[2])
+        
+        # 尺寸属性
+        discrete_w = self.discretize(w, self.num_discrete_size, self.continuous_range_size[0])
+        discrete_h = self.discretize(h, self.num_discrete_size, self.continuous_range_size[1])
+        discrete_l = self.discretize(l, self.num_discrete_size, self.continuous_range_size[2])
+        
+        # 3D嵌入（包含旋转）- 使用3属性结构
+        # 位置embedding
+        pos_discrete = discrete_x + discrete_y * self.num_discrete_position + discrete_z * (self.num_discrete_position ** 2)
+        pos_embed = self.position_embed(pos_discrete)
+        
+        # 旋转embedding
+        rot_discrete = discrete_roll + discrete_pitch * self.num_discrete_rotation + discrete_yaw * (self.num_discrete_rotation ** 2)
+        rot_embed = self.rotation_embed(rot_discrete)
+        
+        # 尺寸embedding
+        size_discrete = discrete_w + discrete_h * self.num_discrete_size + discrete_l * (self.num_discrete_size ** 2)
+        size_embed = self.size_embed(size_discrete)
         
         # 组合3D特征（包含旋转）
-        primitive_embed, _ = pack([x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed, yaw_embed], 'b np *')
+        primitive_embed, _ = pack([pos_embed, rot_embed, size_embed], 'b np *')
         primitive_embed = self.project_in(primitive_embed)
         
         # 使用primitive_mask将无效位置的embedding设置为0
@@ -1025,23 +806,22 @@ class PrimitiveTransformer3D(nn.Module):
     def forward(
         self,
         *,
-        x: Tensor,
-        y: Tensor,
-        z: Tensor,  # 新增z坐标
-        w: Tensor,
-        h: Tensor,
-        l: Tensor,  # 新增length
-        roll: Tensor,  # 新增旋转
-        pitch: Tensor,
-        yaw: Tensor,
-        image: Tensor,  # 现在是RGBXYZ，6通道
+        position: Tensor,  # [B, seq_len, 3] - (x, y, z)
+        rotation: Tensor,   # [B, seq_len, 3] - (roll, pitch, yaw)
+        size: Tensor,       # [B, seq_len, 3] - (l, w, h)
+        image: Tensor,      # [B, 6, H, W] - RGBXYZ
     ):
-        """3D前向传播"""
+        """3D前向传播 - 使用3属性结构"""
+        # 分离各个属性
+        x, y, z = position[:, :, 0], position[:, :, 1], position[:, :, 2]
+        roll, pitch, yaw = rotation[:, :, 0], rotation[:, :, 1], rotation[:, :, 2]
+        l, w, h = size[:, :, 0], size[:, :, 1], size[:, :, 2]
+        
         # 创建3D mask（包含旋转）
         primitive_mask = (x != self.pad_id) & (y != self.pad_id) & (z != self.pad_id) & (w != self.pad_id) & (h != self.pad_id) & (l != self.pad_id) & (roll != self.pad_id) & (pitch != self.pad_id) & (yaw != self.pad_id)
         
         # 编码3D基本体（包含旋转）
-        codes, discrete_coords = self.encode_primitive(x, y, z, w, h, l, roll, pitch, yaw, primitive_mask)
+        codes, discrete_coords = self.encode_primitive(position, rotation, size, primitive_mask)
 
         # 编码RGBXYZ图像
         image_embed = self.image_encoder(image)  # [batch_size, H*W, image_encoder_dim]
@@ -1086,30 +866,24 @@ class PrimitiveTransformer3D(nn.Module):
     def forward_with_predictions(
         self,
         *,
-        x: Tensor,
-        y: Tensor,
-        z: Tensor,
-        w: Tensor,
-        h: Tensor,
-        l: Tensor,
-        roll: Tensor,
-        pitch: Tensor,
-        yaw: Tensor,
-        image: Tensor
+        position: Tensor,  # [B, seq_len, 3] - (x, y, z)
+        rotation: Tensor,   # [B, seq_len, 3] - (roll, pitch, yaw)
+        size: Tensor,       # [B, seq_len, 3] - (l, w, h)
+        image: Tensor,      # [B, 6, H, W] - RGBXYZ
     ):
         """带预测输出的前向传播，用于训练"""
         # 先调用标准前向传播获取attended_codes
         attended_codes = self.forward(
-            x=x, y=y, z=z, w=w, h=h, l=l, roll=roll, pitch=pitch, yaw=yaw, image=image
+            position=position, rotation=rotation, size=size, image=image
         )
         
         # attended_codes shape: [batch_size, seq_len, model_dim]
         batch_size, seq_len, _ = attended_codes.shape
         
         # 为每个序列位置计算预测 - 使用3D向量预测
-        all_logits = {f'{attr}_logits': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
-        all_deltas = {f'{attr}_delta': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
-        all_continuous = {f'{attr}_continuous': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
+        all_logits = {'position_logits': [], 'rotation_logits': [], 'size_logits': []}
+        all_deltas = {'position_delta': [], 'rotation_delta': [], 'size_delta': []}
+        all_continuous = {'position_continuous': [], 'rotation_continuous': [], 'size_continuous': []}
         eos_logits_list = []
         
         for t in range(seq_len):
@@ -1139,30 +913,27 @@ class PrimitiveTransformer3D(nn.Module):
             # 4. 预测EOS
             eos_logit = self.to_eos_logits(torch.cat([step_embed] + prev_embeds, dim=-1)).squeeze(-1)
             
-            # 收集结果
-            for attr in ['x', 'y', 'z']:
-                all_logits[f'{attr}_logits'].append(pos_logits[f'{attr}_logits'])
-                all_deltas[f'{attr}_delta'].append(pos_deltas[f'{attr}_delta'])
-                all_continuous[f'{attr}_continuous'].append(pos_continuous[f'{attr}_continuous'])
+            # 收集结果 - 使用3属性结构
+            all_logits['position_logits'].append(pos_logits['logits'])
+            all_deltas['position_delta'].append(pos_deltas['deltas'])
+            all_continuous['position_continuous'].append(pos_continuous['continuous'])
             
-            for attr in ['roll', 'pitch', 'yaw']:
-                all_logits[f'{attr}_logits'].append(rot_logits[f'{attr}_logits'])
-                all_deltas[f'{attr}_delta'].append(rot_deltas[f'{attr}_delta'])
-                all_continuous[f'{attr}_continuous'].append(rot_continuous[f'{attr}_continuous'])
+            all_logits['rotation_logits'].append(rot_logits['logits'])
+            all_deltas['rotation_delta'].append(rot_deltas['deltas'])
+            all_continuous['rotation_continuous'].append(rot_continuous['continuous'])
             
-            for attr in ['w', 'h', 'l']:
-                all_logits[f'{attr}_logits'].append(size_logits[f'{attr}_logits'])
-                all_deltas[f'{attr}_delta'].append(size_deltas[f'{attr}_delta'])
-                all_continuous[f'{attr}_continuous'].append(size_continuous[f'{attr}_continuous'])
+            all_logits['size_logits'].append(size_logits['logits'])
+            all_deltas['size_delta'].append(size_deltas['deltas'])
+            all_continuous['size_continuous'].append(size_continuous['continuous'])
             
             eos_logits_list.append(eos_logit)
         
-        # 组装最终输出
+        # 组装最终输出 - 使用3属性结构
         logits_dict = {}
         delta_dict = {}
         continuous_dict = {}
         
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
+        for attr in ['position', 'rotation', 'size']:
             logits_dict[f'{attr}_logits'] = torch.stack(all_logits[f'{attr}_logits'], dim=1)
             delta_dict[f'{attr}_delta'] = torch.stack(all_deltas[f'{attr}_delta'], dim=1)
             continuous_dict[f'{attr}_continuous'] = torch.stack(all_continuous[f'{attr}_continuous'], dim=1)
@@ -1178,242 +949,7 @@ class PrimitiveTransformer3D(nn.Module):
     
     @eval_decorator
     @torch.no_grad()
-    def generate(
-        self,
-        image: Tensor,  # RGBXYZ 6通道输入
-        max_seq_len: Optional[int] = None,
-        temperature: float = 1.0,
-        eos_threshold: float = 0.5,
-        debug: bool = False
-    ):
-        """3D autoregressive生成"""
-        max_seq_len = max_seq_len or self.max_seq_len
-        batch_size = image.shape[0]
-        device = image.device
-        
-        # 编码RGBXYZ图像
-        image_embed = self.image_encoder(image)
-        
-        # 添加2D位置编码
-        H = W = int(np.sqrt(image_embed.shape[1]))
-        if H * W == image_embed.shape[1]:
-            pos_embed_2d = build_2d_sine_positional_encoding(H, W, image_embed.shape[-1])
-            pos_embed_2d = pos_embed_2d.flatten(0, 1).unsqueeze(0).to(image_embed.device)
-            image_embed = image_embed + pos_embed_2d
-        
-        # 为每个样本独立跟踪3D生成结果
-        generated_results = {
-            'x': [[] for _ in range(batch_size)],
-            'y': [[] for _ in range(batch_size)],
-            'z': [[] for _ in range(batch_size)],  # 新增z坐标
-            'w': [[] for _ in range(batch_size)],
-            'h': [[] for _ in range(batch_size)],
-            'l': [[] for _ in range(batch_size)]   # 新增length
-        }
-        
-        # 跟踪每个样本是否已经停止生成
-        stopped_samples = torch.zeros(batch_size, dtype=torch.bool, device=image.device)
-        
-        # 初始序列：只有SOS token
-        current_sequence = repeat(self.sos_token, 'n d -> b n d', b=batch_size)
-        
-        for step in range(max_seq_len):
-            # 如果所有样本都停止了，提前结束
-            if torch.all(stopped_samples):
-                break
-            
-            primitive_codes = current_sequence
-            seq_len = primitive_codes.shape[1]
-            pos_embed = self.pos_embed[:, :seq_len, :]
-            primitive_codes = primitive_codes + pos_embed
-            
-            # 图像条件化处理
-            if self.condition_on_image and self.image_film_cond is not None:
-                pooled_image_embed = image_embed.mean(dim=1)
-                image_cond = self.image_cond_proj_film(pooled_image_embed)
-                primitive_codes = self.image_film_cond(primitive_codes, image_cond)
-            
-            # 门控循环块处理
-            if self.gateloop_block is not None:
-                primitive_codes, gateloop_cache = self.gateloop_block(primitive_codes)
-            
-            # 通过decoder获取attended codes
-            attended_codes = self.decoder(
-                primitive_codes,
-                context=image_embed,
-            )
-            
-            # 用最后一个位置预测下一个token
-            next_embed = attended_codes[:, -1]
-            
-            # 预测3D坐标和尺寸 - 按顺序：x, y, z, w, h, l
-            # 预测x坐标 - 使用连续值embedding
-            x_logits = self.to_x_logits(next_embed)
-            x_delta = torch.tanh(self.to_x_delta(next_embed).squeeze(-1)) * 0.5
-            if temperature == 0:
-                next_x_discrete = x_logits.argmax(dim=-1)
-            else:
-                x_probs = F.softmax(x_logits / temperature, dim=-1)
-                next_x_discrete = torch.multinomial(x_probs, 1).squeeze(-1)
-            
-            # 计算x的连续值用于后续预测
-            x_continuous_base = self.continuous_from_discrete(next_x_discrete, self.num_discrete_x, self.continuous_range_x)
-            x_continuous = x_continuous_base + x_delta
-            x_embed = self.get_continuous_embed('x', x_continuous)
-            
-            # 预测y坐标 - 使用连续值embedding
-            y_input = torch.cat([next_embed, x_embed], dim=-1)
-            y_logits = self.to_y_logits(y_input)
-            y_delta = torch.tanh(self.to_y_delta(y_input).squeeze(-1)) * 0.5
-            
-            if temperature == 0:
-                next_y_discrete = y_logits.argmax(dim=-1)
-            else:
-                y_probs = F.softmax(y_logits / temperature, dim=-1)
-                next_y_discrete = torch.multinomial(y_probs, 1).squeeze(-1)
-            
-            # 计算y的连续值用于后续预测
-            y_continuous_base = self.continuous_from_discrete(next_y_discrete, self.num_discrete_y, self.continuous_range_y)
-            y_continuous = y_continuous_base + y_delta
-            y_embed = self.get_continuous_embed('y', y_continuous)
-            
-            # 预测z坐标 - 使用连续值embedding
-            z_input = torch.cat([next_embed, x_embed, y_embed], dim=-1)
-            z_logits = self.to_z_logits(z_input)
-            z_delta = torch.tanh(self.to_z_delta(z_input).squeeze(-1)) * 0.5
-            
-            if temperature == 0:
-                next_z_discrete = z_logits.argmax(dim=-1)
-            else:
-                z_probs = F.softmax(z_logits / temperature, dim=-1)
-                next_z_discrete = torch.multinomial(z_probs, 1).squeeze(-1)
-            
-            # 计算z的连续值用于后续预测
-            z_continuous_base = self.continuous_from_discrete(next_z_discrete, self.num_discrete_z, self.continuous_range_z)
-            z_continuous = z_continuous_base + z_delta
-            z_embed = self.get_continuous_embed('z', z_continuous)
-            
-            # 预测w（宽度）- 使用连续值embedding
-            w_input = torch.cat([next_embed, x_embed, y_embed, z_embed], dim=-1)
-            w_logits = self.to_w_logits(w_input)
-            w_delta = torch.tanh(self.to_w_delta(w_input).squeeze(-1)) * 0.5
-            
-            if temperature == 0:
-                next_w_discrete = w_logits.argmax(dim=-1)
-            else:
-                w_probs = F.softmax(w_logits / temperature, dim=-1)
-                next_w_discrete = torch.multinomial(w_probs, 1).squeeze(-1)
-            
-            # 计算w的连续值用于后续预测
-            w_continuous_base = self.continuous_from_discrete(next_w_discrete, self.num_discrete_w, self.continuous_range_w)
-            w_continuous = w_continuous_base + w_delta
-            w_embed = self.get_continuous_embed('w', w_continuous)
-            
-            # 预测h（高度）- 使用连续值embedding
-            h_input = torch.cat([next_embed, x_embed, y_embed, z_embed, w_embed], dim=-1)
-            h_logits = self.to_h_logits(h_input)
-            h_delta = torch.tanh(self.to_h_delta(h_input).squeeze(-1)) * 0.5
-            
-            if temperature == 0:
-                next_h_discrete = h_logits.argmax(dim=-1)
-            else:
-                h_probs = F.softmax(h_logits / temperature, dim=-1)
-                next_h_discrete = torch.multinomial(h_probs, 1).squeeze(-1)
-            
-            # 计算h的连续值用于后续预测
-            h_continuous_base = self.continuous_from_discrete(next_h_discrete, self.num_discrete_h, self.continuous_range_h)
-            h_continuous = h_continuous_base + h_delta
-            h_embed = self.get_continuous_embed('h', h_continuous)
-            
-            # 预测l（长度）- 使用连续值embedding
-            l_input = torch.cat([next_embed, x_embed, y_embed, z_embed, w_embed, h_embed], dim=-1)
-            l_logits = self.to_l_logits(l_input)
-            l_delta = torch.tanh(self.to_l_delta(l_input).squeeze(-1)) * 0.5
-            
-            if temperature == 0:
-                next_l_discrete = l_logits.argmax(dim=-1)
-            else:
-                l_probs = F.softmax(l_logits / temperature, dim=-1)
-                next_l_discrete = torch.multinomial(l_probs, 1).squeeze(-1)
-            
-            # 计算l的连续值
-            l_continuous_base = self.continuous_from_discrete(next_l_discrete, self.num_discrete_l, self.continuous_range_l)
-            l_continuous = l_continuous_base + l_delta
-            
-            # 使用已经计算好的连续值（包含delta）
-            x_center_pred = x_continuous
-            y_center_pred = y_continuous
-            z_center_pred = z_continuous
-            w_center_pred = w_continuous
-            h_center_pred = h_continuous
-            l_center_pred = l_continuous
-
-            # 连续值已经在上面计算好了（包含delta），直接使用并应用范围限制
-            x_continuous = x_center_pred.clamp(self.continuous_range_x[0], self.continuous_range_x[1])
-            y_continuous = y_center_pred.clamp(self.continuous_range_y[0], self.continuous_range_y[1])
-            z_continuous = z_center_pred.clamp(self.continuous_range_z[0], self.continuous_range_z[1])
-            w_continuous = w_center_pred.clamp(self.continuous_range_w[0], self.continuous_range_w[1])
-            h_continuous = h_center_pred.clamp(self.continuous_range_h[0], self.continuous_range_h[1])
-            l_continuous = l_center_pred.clamp(self.continuous_range_l[0], self.continuous_range_l[1])
-            
-            # 只为未停止的样本保存3D结果
-            for i in range(batch_size):
-                if not stopped_samples[i]:
-                    generated_results['x'][i].append(x_continuous[i])
-                    generated_results['y'][i].append(y_continuous[i])
-                    generated_results['z'][i].append(z_continuous[i])
-                    generated_results['w'][i].append(w_continuous[i])
-                    generated_results['h'][i].append(h_continuous[i])
-                    generated_results['l'][i].append(l_continuous[i])
-            
-            # 预测EOS
-            eos_logits = self.to_eos_logits(next_embed).squeeze(-1)
-            eos_prob = torch.sigmoid(eos_logits)
-            new_stopped = eos_prob > eos_threshold
-            stopped_samples = stopped_samples | new_stopped
-            if debug:
-                print(f"Step {step}: EOS probs = {eos_prob.tolist()}, stopped(next) = {stopped_samples.tolist()}")
-            
-            # 编码3D预测结果并添加到序列
-            pred_embed, _ = self.encode_primitive(
-                x_continuous.unsqueeze(0), y_continuous.unsqueeze(0), z_continuous.unsqueeze(0),
-                w_continuous.unsqueeze(0), h_continuous.unsqueeze(0), l_continuous.unsqueeze(0),
-                torch.ones_like(x_continuous, dtype=torch.bool).unsqueeze(0)
-            )
-
-            pred_embed = pred_embed.transpose(0, 1)
-            current_sequence = torch.cat([current_sequence, pred_embed], dim=1)
-        
-        # 将3D结果转换为张量格式
-        max_len = max(len(generated_results['x'][i]) for i in range(batch_size))
-        
-        if max_len == 0:
-            return None
-        
-        # 创建3D结果张量
-        result = {
-            'x': torch.zeros(batch_size, max_len, device=device),
-            'y': torch.zeros(batch_size, max_len, device=device),
-            'z': torch.zeros(batch_size, max_len, device=device),
-            'w': torch.zeros(batch_size, max_len, device=device),
-            'h': torch.zeros(batch_size, max_len, device=device),
-            'l': torch.zeros(batch_size, max_len, device=device),
-        }
-        
-        for i in range(batch_size):
-            seq_len = len(generated_results['x'][i])
-            if seq_len > 0:
-                result['x'][i, :seq_len] = torch.stack(generated_results['x'][i])
-                result['y'][i, :seq_len] = torch.stack(generated_results['y'][i])
-                result['z'][i, :seq_len] = torch.stack(generated_results['z'][i])
-                result['w'][i, :seq_len] = torch.stack(generated_results['w'][i])
-                result['h'][i, :seq_len] = torch.stack(generated_results['h'][i])
-                result['l'][i, :seq_len] = torch.stack(generated_results['l'][i])
-        
-        return result
-    
     # ======================== 增量推理相关代码 ========================
-    
     def initialize_incremental_generation(
         self,
         image: Tensor,
@@ -1630,23 +1166,36 @@ class PrimitiveTransformer3D(nn.Module):
         # 保存生成结果（只为未停止的样本）
         for i in range(batch_size):
             if not state.stopped_samples[i]:
-                for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
-                    # 保存tensor而不是float，以便后续stack操作
-                    state.generated_boxes[attr][i].append(box_prediction[attr][i:i+1])  # 保持tensor形状
+                # 保存位置属性 - pos_continuous是[B, 3]张量
+                state.generated_boxes['x'][i].append(pos_continuous[i:i+1, 0:1])
+                state.generated_boxes['y'][i].append(pos_continuous[i:i+1, 1:2])
+                state.generated_boxes['z'][i].append(pos_continuous[i:i+1, 2:3])
+                
+                # 保存旋转属性 - rot_continuous是[B, 3]张量
+                state.generated_boxes['roll'][i].append(rot_continuous[i:i+1, 0:1])
+                state.generated_boxes['pitch'][i].append(rot_continuous[i:i+1, 1:2])
+                state.generated_boxes['yaw'][i].append(rot_continuous[i:i+1, 2:3])
+                
+                # 保存尺寸属性 - size_continuous是[B, 3]张量
+                state.generated_boxes['w'][i].append(size_continuous[i:i+1, 0:1])
+                state.generated_boxes['h'][i].append(size_continuous[i:i+1, 1:2])
+                state.generated_boxes['l'][i].append(size_continuous[i:i+1, 2:3])
         
         # 🔧 修复Bug: 更新current_sequence以便下一步使用
-        # 构建下一步的输入embedding
+        # 构建下一步的输入embedding - 使用新的3属性结构
         next_embeds = []
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
-            continuous_val = box_prediction[attr]
-            # 获取对应的离散化参数
-            num_discrete = getattr(self, f'num_discrete_{attr}')
-            continuous_range = getattr(self, f'continuous_range_{attr}')
-            
-            # 离散化连续值
-            attr_discrete = self.discretize(continuous_val, num_discrete, continuous_range)
-            attr_embed = getattr(self, f'{attr}_embed')(attr_discrete)
-            next_embeds.append(attr_embed)
+        
+        # 位置属性embedding - pos_continuous已经是[B, 3]张量
+        pos_embed = self.get_continuous_embed('position', pos_continuous)
+        next_embeds.append(pos_embed)
+        
+        # 旋转属性embedding - rot_continuous已经是[B, 3]张量
+        rot_embed = self.get_continuous_embed('rotation', rot_continuous)
+        next_embeds.append(rot_embed)
+        
+        # 尺寸属性embedding - size_continuous已经是[B, 3]张量
+        size_embed = self.get_continuous_embed('size', size_continuous)
+        next_embeds.append(size_embed)
         
         # 组合所有属性的embedding
         combined_embed = torch.cat(next_embeds, dim=-1)  # [B, total_embed_dim]
@@ -1671,38 +1220,6 @@ class PrimitiveTransformer3D(nn.Module):
             probs = F.softmax(logits / temperature, dim=-1)
             return torch.multinomial(probs, 1).squeeze(-1)
     
-    def _compute_continuous_value_from_discrete_delta(self, discrete: Tensor, delta: Tensor, attr: str) -> Tensor:
-        """从离散值和delta计算连续值"""
-        # 获取属性配置
-        if attr == 'x':
-            num_bins, value_range = self.num_discrete_x, self.continuous_range_x
-        elif attr == 'y':
-            num_bins, value_range = self.num_discrete_y, self.continuous_range_y
-        elif attr == 'z':
-            num_bins, value_range = self.num_discrete_z, self.continuous_range_z
-        elif attr == 'w':
-            num_bins, value_range = self.num_discrete_w, self.continuous_range_w
-        elif attr == 'h':
-            num_bins, value_range = self.num_discrete_h, self.continuous_range_h
-        elif attr == 'l':
-            num_bins, value_range = self.num_discrete_l, self.continuous_range_l
-        elif attr == 'roll':
-            num_bins, value_range = self.num_discrete_roll, self.continuous_range_roll
-        elif attr == 'pitch':
-            num_bins, value_range = self.num_discrete_pitch, self.continuous_range_pitch
-        elif attr == 'yaw':
-            num_bins, value_range = self.num_discrete_yaw, self.continuous_range_yaw
-        else:
-            raise ValueError(f"Unknown attribute: {attr}")
-        
-        # 计算连续值
-        continuous_base = self.continuous_from_discrete(discrete, num_bins, value_range)
-        continuous_value = continuous_base + delta
-        
-        # 应用范围限制
-        continuous_value = continuous_value.clamp(value_range[0], value_range[1])
-        
-        return continuous_value
     
     @eval_decorator
     @torch.no_grad()

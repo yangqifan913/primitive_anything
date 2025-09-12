@@ -47,27 +47,27 @@ def apply_local_rotation_scipy(roll, pitch, yaw, axis, angle):
     在局部坐标系中应用旋转 (使用scipy)
     
     Args:
-        roll, pitch, yaw: 当前欧拉角
+        roll, pitch, yaw: 当前欧拉角（弧度）
         axis: 旋转轴 ('x', 'y', 'z')
         angle: 旋转角度（弧度）
     
     Returns:
-        new_roll, new_pitch, new_yaw: 新的欧拉角
+        new_roll, new_pitch, new_yaw: 新的欧拉角（弧度）
     """
     from scipy.spatial.transform import Rotation as R_scipy
     import numpy as np
     
-    # 将欧拉角转换为旋转矩阵
-    r_original = R_scipy.from_euler('xyz', [roll, pitch, yaw])
+    # 将欧拉角转换为旋转矩阵（输入弧度）
+    r_original = R_scipy.from_euler('xyz', [roll, pitch, yaw], degrees=False)
     R_original = r_original.as_matrix()
     
-    # 创建局部旋转矩阵
+    # 创建局部旋转矩阵（输入弧度）
     if axis == 'x':
-        r_local = R_scipy.from_euler('x', angle)
+        r_local = R_scipy.from_euler('x', angle, degrees=False)
     elif axis == 'y':
-        r_local = R_scipy.from_euler('y', angle)
+        r_local = R_scipy.from_euler('y', angle, degrees=False)
     elif axis == 'z':
-        r_local = R_scipy.from_euler('z', angle)
+        r_local = R_scipy.from_euler('z', angle, degrees=False)
     else:
         raise ValueError(f"Invalid axis: {axis}")
     
@@ -76,7 +76,7 @@ def apply_local_rotation_scipy(roll, pitch, yaw, axis, angle):
     # 应用局部旋转：R_new = R_original * R_local
     R_new = R_original @ R_local
     
-    # 转换回欧拉角
+    # 转换回欧拉角（输出弧度）
     r_new = R_scipy.from_matrix(R_new)
     euler_new = r_new.as_euler('xyz', degrees=False)
     
@@ -107,6 +107,7 @@ def generate_equivalent_box_representations(x, y, z, l, w, h, roll, pitch, yaw):
     
     # 2. 尺寸排列 (l, h, w): 相当于绕length轴旋转90°
     # length轴对应box的x轴，即世界坐标系的x轴
+    import math
     new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'x', math.pi/2)
     equivalent_boxes.append((x, y, z, l, h, w, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
     
@@ -133,7 +134,7 @@ def generate_equivalent_box_representations(x, y, z, l, w, h, roll, pitch, yaw):
     return equivalent_boxes
 
 def normalize_angle(angle):
-    """将角度归一化到[-π/2, π/2]范围"""
+    """将角度归一化到[-π/2, π/2]范围（弧度）"""
     import math
     while angle > math.pi/2:
         angle -= math.pi
@@ -261,9 +262,15 @@ class Box3DDataset(Dataset):
             self.continuous_range_h = continuous_ranges.get('h', [0.3, 0.7])
             self.continuous_range_l = continuous_ranges.get('l', [0.3, 0.7])
             # 旋转范围
-            self.continuous_range_roll = continuous_ranges.get('roll', [-1.5708, 1.5708])
-            self.continuous_range_pitch = continuous_ranges.get('pitch', [-1.5708, 1.5708])
-            self.continuous_range_yaw = continuous_ranges.get('yaw', [-1.5708, 1.5708])
+            # 从角度转换为弧度（config用角度，模型用弧度）
+            import math
+            roll_range = continuous_ranges.get('roll', [-90.0, 90.0])
+            pitch_range = continuous_ranges.get('pitch', [-90.0, 90.0])
+            yaw_range = continuous_ranges.get('yaw', [-90.0, 90.0])
+            
+            self.continuous_range_roll = [math.radians(roll_range[0]), math.radians(roll_range[1])]
+            self.continuous_range_pitch = [math.radians(pitch_range[0]), math.radians(pitch_range[1])]
+            self.continuous_range_yaw = [math.radians(yaw_range[0]), math.radians(yaw_range[1])]
         else:
             # 使用默认值
             self.continuous_range_x = [0.5, 2.5]
@@ -273,9 +280,11 @@ class Box3DDataset(Dataset):
             self.continuous_range_h = [0.3, 0.7]
             self.continuous_range_l = [0.3, 0.7]
             # 旋转范围默认值
-            self.continuous_range_roll = [-1.5708, 1.5708]
-            self.continuous_range_pitch = [-1.5708, 1.5708]
-            self.continuous_range_yaw = [-1.5708, 1.5708]
+            # 默认角度范围转换为弧度
+            import math
+            self.continuous_range_roll = [math.radians(-90.0), math.radians(90.0)]
+            self.continuous_range_pitch = [math.radians(-90.0), math.radians(90.0)]
+            self.continuous_range_yaw = [math.radians(-90.0), math.radians(90.0)]
         
         # 打印配置信息
         if self.augment:
