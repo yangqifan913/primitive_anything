@@ -1544,13 +1544,19 @@ class AdvancedTrainer:
                     
                     if valid_mask.sum() > 0:
                         # 计算有效位置的绝对误差
-                        abs_errors = torch.abs(gen_values - gt_values)
-                        valid_errors = abs_errors[valid_mask]
+                        # 确保两个张量形状匹配
+                        min_len = min(gen_values.shape[1], gt_values.shape[1])
+                        gen_values_aligned = gen_values[:, :min_len]
+                        gt_values_aligned = gt_values[:, :min_len]
+                        valid_mask_aligned = valid_mask[:, :min_len]
+                        
+                        abs_errors = torch.abs(gen_values_aligned - gt_values_aligned)
+                        valid_errors = abs_errors[valid_mask_aligned]
                         
                         # 计算平均误差
-                        mean_error = valid_errors.mean().item()
+                        mean_error = valid_errors.mean().item() if len(valid_errors) > 0 else 0.0
                         dimension_errors[f'{attr}_error'] = mean_error
-                        total_valid_predictions += valid_mask.sum().item()
+                        total_valid_predictions += valid_mask_aligned.sum().item()
                     else:
                         dimension_errors[f'{attr}_error'] = 0.0
                 else:
