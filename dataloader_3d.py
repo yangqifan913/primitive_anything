@@ -78,7 +78,7 @@ def rotation_matrix_to_euler_scipy(R):
 
 def apply_local_rotation_scipy(roll, pitch, yaw, axis, angle):
     """
-    在局部坐标系中应用旋转 (使用scipy)
+    在局部坐标系中应用旋转 (使用scipy，避免万向锁)
     
     Args:
         roll, pitch, yaw: 当前欧拉角（弧度）
@@ -90,29 +90,30 @@ def apply_local_rotation_scipy(roll, pitch, yaw, axis, angle):
     """
     from scipy.spatial.transform import Rotation as R_scipy
     import numpy as np
+    import warnings
     
-    # 将欧拉角转换为旋转矩阵（输入弧度）
-    r_original = R_scipy.from_euler('xyz', [roll, pitch, yaw], degrees=False)
-    R_original = r_original.as_matrix()
-    
-    # 创建局部旋转矩阵（输入弧度）
-    if axis == 'x':
-        r_local = R_scipy.from_euler('x', angle, degrees=False)
-    elif axis == 'y':
-        r_local = R_scipy.from_euler('y', angle, degrees=False)
-    elif axis == 'z':
-        r_local = R_scipy.from_euler('z', angle, degrees=False)
-    else:
-        raise ValueError(f"Invalid axis: {axis}")
-    
-    R_local = r_local.as_matrix()
-    
-    # 应用局部旋转：R_new = R_original * R_local
-    R_new = R_original @ R_local
-    
-    # 转换回欧拉角（输出弧度）
-    r_new = R_scipy.from_matrix(R_new)
-    euler_new = r_new.as_euler('xyz', degrees=False)
+    # 使用四元数避免万向锁问题
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # 忽略万向锁警告
+        
+        # 将欧拉角转换为四元数（输入弧度）
+        r_original = R_scipy.from_euler('xyz', [roll, pitch, yaw], degrees=False)
+        
+        # 创建局部旋转四元数（输入弧度）
+        if axis == 'x':
+            r_local = R_scipy.from_euler('x', angle, degrees=False)
+        elif axis == 'y':
+            r_local = R_scipy.from_euler('y', angle, degrees=False)
+        elif axis == 'z':
+            r_local = R_scipy.from_euler('z', angle, degrees=False)
+        else:
+            raise ValueError(f"Invalid axis: {axis}")
+        
+        # 应用局部旋转：q_new = q_original * q_local
+        r_new = r_original * r_local
+        
+        # 转换回欧拉角（输出弧度）
+        euler_new = r_new.as_euler('xyz', degrees=False)
     
     return euler_new[0], euler_new[1], euler_new[2]
 

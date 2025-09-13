@@ -1517,15 +1517,14 @@ class AdvancedTrainer:
                     if gen_values.shape[1] > target_seq_len:
                         gen_values = gen_values[:, :target_seq_len]
                     elif gen_values.shape[1] < target_seq_len:
-                        # 用零填充
-                        padding_length = target_seq_len - gen_values.shape[1]
-                        padding = torch.zeros(gen_values.shape[0], padding_length, device=gen_values.device)
-                        gen_values = torch.cat([gen_values, padding], dim=1)
+                        # 不填充，保持原始长度，让IoU计算自己处理长度不匹配
+                        pass
                     
                     processed_gen_results[attr] = gen_values
                 else:
-                    # 如果某个属性缺失，使用零填充
-                    processed_gen_results[attr] = torch.zeros(targets[attr].shape, device=targets[attr].device)
+                    # 如果某个属性缺失，跳过该属性，不进行IoU计算
+                    print(f"⚠️  生成结果中缺少属性 {attr}，跳过该属性的IoU计算")
+                    continue
             
             # 计算IoU
             gen_iou = self._compute_generation_iou(processed_gen_results, targets, verbose)
@@ -1754,11 +1753,33 @@ class AdvancedTrainer:
                 print(f"⚠️  OBB输入格式错误: box1={len(box1)}, box2={len(box2)}, rot1={len(rot1)}, rot2={len(rot2)}")
                 return 0.0
             
+            # 检查输入参数的有效性
+            if np.any(np.isnan(box1)) or np.any(np.isinf(box1)):
+                print(f"⚠️  Box1包含无效值: box1={box1}")
+                return 0.0
+            if np.any(np.isnan(box2)) or np.any(np.isinf(box2)):
+                print(f"⚠️  Box2包含无效值: box2={box2}")
+                return 0.0
+            if np.any(np.isnan(rot1)) or np.any(np.isinf(rot1)):
+                print(f"⚠️  Rot1包含无效值: rot1={rot1}")
+                return 0.0
+            if np.any(np.isnan(rot2)) or np.any(np.isinf(rot2)):
+                print(f"⚠️  Rot2包含无效值: rot2={rot2}")
+                return 0.0
+            
             # 提取box参数
             center1 = np.array(box1[:3])  # [x, y, z]
             size1 = np.array(box1[3:])    # [l, w, h]
             center2 = np.array(box2[:3])  # [x, y, z]
             size2 = np.array(box2[3:])    # [l, w, h]
+            
+            # 检查尺寸是否有效（避免尺寸为0的box）
+            if np.any(size1 <= 0) or np.any(size2 <= 0):
+                print(f"⚠️  检测到无效尺寸的box:")
+                print(f"  Box1尺寸: {size1} (l={size1[0]:.6f}, w={size1[1]:.6f}, h={size1[2]:.6f})")
+                print(f"  Box2尺寸: {size2} (l={size2[0]:.6f}, w={size2[1]:.6f}, h={size2[2]:.6f})")
+                print(f"  返回IoU=0.0")
+                return 0.0
             
             # 创建旋转矩阵
             rot_matrix1 = Rotation.from_euler('xyz', rot1).as_matrix()
@@ -1792,8 +1813,23 @@ class AdvancedTrainer:
             # 计算两个OBB的凸包
             try:
                 # 验证顶点数据的有效性
-                if not self._validate_vertices(vertices1) or not self._validate_vertices(vertices2):
-                    raise ValueError("顶点数据无效，无法计算OBB IoU")
+                if not self._validate_vertices(vertices1):
+                    print(f"⚠️  Box1顶点数据无效:")
+                    print(f"  center1: {center1}")
+                    print(f"  size1: {size1}")
+                    print(f"  rot1: {rot1}")
+                    print(f"  vertices1 shape: {vertices1.shape}")
+                    print(f"  vertices1 sample: {vertices1[:3]}")
+                    raise ValueError("Box1顶点数据无效，无法计算OBB IoU")
+                
+                if not self._validate_vertices(vertices2):
+                    print(f"⚠️  Box2顶点数据无效:")
+                    print(f"  center2: {center2}")
+                    print(f"  size2: {size2}")
+                    print(f"  rot2: {rot2}")
+                    print(f"  vertices2 shape: {vertices2.shape}")
+                    print(f"  vertices2 sample: {vertices2[:3]}")
+                    raise ValueError("Box2顶点数据无效，无法计算OBB IoU")
                 
                 hull1 = ConvexHull(vertices1)
                 hull2 = ConvexHull(vertices2)
