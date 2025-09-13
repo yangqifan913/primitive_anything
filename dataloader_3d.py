@@ -8,6 +8,40 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
+
+def custom_collate_fn(batch):
+    """自定义collate函数，处理字典格式的batch"""
+    if not batch:
+        return {}
+    
+    # 获取所有键
+    keys = batch[0].keys()
+    
+    # 对每个键进行处理
+    collated = {}
+    for key in keys:
+        values = [item[key] for item in batch]
+        
+        # 特殊处理非tensor类型
+        if key in ['folder_name']:
+            # 字符串类型，直接保留为列表
+            collated[key] = values
+        elif key in ['equivalent_boxes']:
+            # 列表类型，直接保留为列表
+            collated[key] = values
+        else:
+            # tensor类型，进行stack
+            tensor_values = []
+            for value in values:
+                if isinstance(value, torch.Tensor):
+                    tensor_values.append(value)
+                else:
+                    # 其他类型转换为tensor
+                    tensor_values.append(torch.tensor(value))
+            
+            collated[key] = torch.stack(tensor_values, dim=0)
+    
+    return collated
 import json
 import yaml
 from pathlib import Path
@@ -261,13 +295,21 @@ class Box3DDataset(Dataset):
             self.continuous_range_w = continuous_ranges.get('w', [0.3, 0.7])
             self.continuous_range_h = continuous_ranges.get('h', [0.3, 0.7])
             self.continuous_range_l = continuous_ranges.get('l', [0.3, 0.7])
-            # 旋转范围
-            # 从角度转换为弧度（config用角度，模型用弧度）
+            # 旋转范围 - 支持两种格式
             import math
-            roll_range = continuous_ranges.get('roll', [-90.0, 90.0])
-            pitch_range = continuous_ranges.get('pitch', [-90.0, 90.0])
-            yaw_range = continuous_ranges.get('yaw', [-90.0, 90.0])
+            if 'rotation' in continuous_ranges:
+                # 新格式：rotation是3x2数组 [[roll_range], [pitch_range], [yaw_range]]
+                rotation_ranges = continuous_ranges['rotation']
+                roll_range = rotation_ranges[0]  # [min, max]
+                pitch_range = rotation_ranges[1]  # [min, max]
+                yaw_range = rotation_ranges[2]  # [min, max]
+            else:
+                # 旧格式：分别的roll, pitch, yaw键
+                roll_range = continuous_ranges.get('roll', [-90.0, 90.0])
+                pitch_range = continuous_ranges.get('pitch', [-90.0, 90.0])
+                yaw_range = continuous_ranges.get('yaw', [-90.0, 90.0])
             
+            # 从角度转换为弧度（config用角度，模型用弧度）
             self.continuous_range_roll = [math.radians(roll_range[0]), math.radians(roll_range[1])]
             self.continuous_range_pitch = [math.radians(pitch_range[0]), math.radians(pitch_range[1])]
             self.continuous_range_yaw = [math.radians(yaw_range[0]), math.radians(yaw_range[1])]
@@ -748,7 +790,8 @@ def create_dataloader(
         pin_memory=pin_memory,
         drop_last=drop_last,
         prefetch_factor=prefetch_factor if num_workers > 0 else None,
-        persistent_workers=persistent_workers if num_workers > 0 else False
+        persistent_workers=persistent_workers if num_workers > 0 else False,
+        collate_fn=custom_collate_fn  # 添加自定义collate函数
     )
     
     return dataloader

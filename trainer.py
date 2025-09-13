@@ -187,6 +187,9 @@ class AdvancedTrainer:
         global_config = self.config_loader.get_global_config()
         self.validation_samples = validation_samples or global_config['logging']['validation_samples']
         
+        # 设置pad_id属性
+        self.pad_id = global_config['pad_id']
+        
         # 训练状态
         self.current_epoch = 0
         self.current_phase_idx = 0
@@ -371,27 +374,39 @@ class AdvancedTrainer:
             print(f"   GPU数量: {torch.cuda.device_count()}")
             print(f"   数据集路径: {dataset_config.get('data_root', 'N/A')}")
         
-        # 先创建数据集
+        # 使用修复的create_dataloader函数
+        from dataloader_3d import create_dataloader
+        
+        # 准备数据集参数
+        dataset_kwargs = {
+            'data_root': dataset_config['data_root'],
+            'stage': "train",
+            'max_boxes': global_config['max_seq_len'],
+            'image_size': global_config['image_size'],
+            'continuous_ranges': data_config['continuous_ranges'],
+            'augmentation_config': data_config['augmentation']
+        }
+        
+        # 准备DataLoader参数
+        dataloader_kwargs = {
+            'batch_size': dataloader_config['batch_size'],
+            'shuffle': True,
+            'num_workers': dataloader_config['num_workers'],
+            'pin_memory': dataloader_config['pin_memory'],
+            'drop_last': True,
+            'prefetch_factor': dataloader_config['prefetch_factor'],
+            'persistent_workers': dataloader_config['persistent_workers']
+        }
+        
+        # 先创建数据集（用于分布式采样器）
         from dataloader_3d import Box3DDataset
         
-        # 🔧 修复：直接传递配置参数，不依赖外部配置文件
-        train_dataset = Box3DDataset(
-            data_root=dataset_config['data_root'],
-            stage="train",
-            max_boxes=global_config['max_seq_len'],
-            image_size=global_config['image_size'],
-            continuous_ranges=data_config['continuous_ranges'],
-            augmentation_config=data_config['augmentation']
-        )
+        train_dataset = Box3DDataset(**dataset_kwargs)
         
-        val_dataset = Box3DDataset(
-            data_root=dataset_config['data_root'],
-            stage="val",
-            max_boxes=global_config['max_seq_len'],
-            image_size=global_config['image_size'],
-            continuous_ranges=data_config['continuous_ranges'],
-            augmentation_config={}  # 验证时不使用数据增强
-        )
+        val_dataset_kwargs = dataset_kwargs.copy()
+        val_dataset_kwargs['stage'] = "val"
+        val_dataset_kwargs['augmentation_config'] = {}  # 验证时不使用数据增强
+        val_dataset = Box3DDataset(**val_dataset_kwargs)
         
         # 分布式采样器 - 只有在真正的多GPU环境下才创建
         if self.world_size > 1 and torch.cuda.device_count() > 1:
@@ -440,29 +455,18 @@ class AdvancedTrainer:
             print(f"❌ 错误: batch_size={effective_batch_size}，强制设置为1")
             effective_batch_size = 1
         
-        self.train_loader = DataLoader(
-            train_dataset,
-            batch_size=effective_batch_size,
-            sampler=self.train_sampler,
-            shuffle=(self.train_sampler is None),  # 如果没有采样器则shuffle
-            num_workers=dataloader_config['num_workers'],
-            pin_memory=dataloader_config['pin_memory'],
-            drop_last=True,
-            prefetch_factor=dataloader_config['prefetch_factor'] if dataloader_config['num_workers'] > 0 else None,
-            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False
-        )
+        # 更新batch_size
+        dataloader_kwargs['batch_size'] = effective_batch_size
         
-        self.val_loader = DataLoader(
-            val_dataset,
-            batch_size=effective_batch_size,
-            sampler=self.val_sampler,
-            shuffle=False,
-            num_workers=dataloader_config['num_workers'],
-            pin_memory=dataloader_config['pin_memory'],
-            drop_last=False,
-            prefetch_factor=dataloader_config['prefetch_factor'] if dataloader_config['num_workers'] > 0 else None,
-            persistent_workers=dataloader_config['persistent_workers'] if dataloader_config['num_workers'] > 0 else False
-        )
+        # 创建训练DataLoader（使用修复的create_dataloader）
+        self.train_loader = create_dataloader(**dataset_kwargs, **dataloader_kwargs)
+        
+        # 创建验证DataLoader
+        val_dataloader_kwargs = dataloader_kwargs.copy()
+        val_dataloader_kwargs['shuffle'] = False
+        val_dataloader_kwargs['drop_last'] = False
+        
+        self.val_loader = create_dataloader(**val_dataset_kwargs, **val_dataloader_kwargs)
         
         # 优化器 - 移除硬编码
         optimizer_config = self.training_config['optimizer']
@@ -539,15 +543,27 @@ class AdvancedTrainer:
         data_processing = loss_config['data_processing']
         
         return AdaptivePrimitiveTransformer3DLoss(
-            # 离散化参数 - 3个属性
-            num_discrete_position=discretization['num_discrete_position'],
-            num_discrete_rotation=discretization['num_discrete_rotation'],
-            num_discrete_size=discretization['num_discrete_size'],
+            # 离散化参数 - 9个单独属性
+            num_discrete_x=discretization['num_discrete_position'],
+            num_discrete_y=discretization['num_discrete_position'],
+            num_discrete_z=discretization['num_discrete_position'],
+            num_discrete_w=discretization['num_discrete_size'],
+            num_discrete_h=discretization['num_discrete_size'],
+            num_discrete_l=discretization['num_discrete_size'],
+            num_discrete_roll=discretization['num_discrete_rotation'],
+            num_discrete_pitch=discretization['num_discrete_rotation'],
+            num_discrete_yaw=discretization['num_discrete_rotation'],
             
-            # 连续范围参数 - 3个属性
-            continuous_range_position=continuous_ranges['position'],
-            continuous_range_rotation=continuous_ranges['rotation'],
-            continuous_range_size=continuous_ranges['size'],
+            # 连续范围参数 - 9个单独属性
+            continuous_range_x=continuous_ranges['position'][0],
+            continuous_range_y=continuous_ranges['position'][1],
+            continuous_range_z=continuous_ranges['position'][2],
+            continuous_range_w=continuous_ranges['size'][0],
+            continuous_range_h=continuous_ranges['size'][1],
+            continuous_range_l=continuous_ranges['size'][2],
+            continuous_range_roll=continuous_ranges['rotation'][0],
+            continuous_range_pitch=continuous_ranges['rotation'][1],
+            continuous_range_yaw=continuous_ranges['rotation'][2],
             
             # 基础损失权重
             base_classification_weight=base_weights['classification'],
@@ -615,15 +631,15 @@ class AdvancedTrainer:
                     
                     # 构建预测box
                     pred_box = [
-                        outputs['continuous_dict']['x'][b, s].item(),
-                        outputs['continuous_dict']['y'][b, s].item(),
-                        outputs['continuous_dict']['z'][b, s].item(),
-                        outputs['continuous_dict']['l'][b, s].item(),
-                        outputs['continuous_dict']['w'][b, s].item(),
-                        outputs['continuous_dict']['h'][b, s].item(),
-                        outputs['continuous_dict']['roll'][b, s].item(),
-                        outputs['continuous_dict']['pitch'][b, s].item(),
-                        outputs['continuous_dict']['yaw'][b, s].item(),
+                        outputs['continuous_dict']['x_continuous'][b, s].item(),
+                        outputs['continuous_dict']['y_continuous'][b, s].item(),
+                        outputs['continuous_dict']['z_continuous'][b, s].item(),
+                        outputs['continuous_dict']['l_continuous'][b, s].item(),
+                        outputs['continuous_dict']['w_continuous'][b, s].item(),
+                        outputs['continuous_dict']['h_continuous'][b, s].item(),
+                        outputs['continuous_dict']['roll_continuous'][b, s].item(),
+                        outputs['continuous_dict']['pitch_continuous'][b, s].item(),
+                        outputs['continuous_dict']['yaw_continuous'][b, s].item(),
                     ]
                     
                     # 获取该box的等价表示
@@ -679,17 +695,16 @@ class AdvancedTrainer:
         if teacher_forcing_ratio >= 1.0:
             # 完全teacher forcing：直接用GT
             inputs = targets
-            # 统一使用forward_with_predictions
+            # 统一使用forward_with_predictions - 3属性格式
+            # 构建3属性张量
+            position = torch.stack([inputs['x'], inputs['y'], inputs['z']], dim=-1)  # [B, seq_len, 3]
+            rotation = torch.stack([inputs['roll'], inputs['pitch'], inputs['yaw']], dim=-1)  # [B, seq_len, 3]
+            size = torch.stack([inputs['l'], inputs['w'], inputs['h']], dim=-1)  # [B, seq_len, 3]
+            
             outputs = model.forward_with_predictions(
-                x=inputs['x'],
-                y=inputs['y'],
-                z=inputs['z'],
-                w=inputs['w'],
-                h=inputs['h'],
-                l=inputs['l'],
-                roll=inputs['roll'],
-                pitch=inputs['pitch'],
-                yaw=inputs['yaw'],
+                position=position,
+                rotation=rotation,
+                size=size,
                 image=rgbxyz
             )
             return outputs
@@ -709,16 +724,15 @@ class AdvancedTrainer:
         # ===== 第一次推理：Teacher Forcing模式（不需要梯度） =====
         # 使用Ground Truth作为输入，得到模型的预测结果
         with torch.no_grad():
+            # 构建3属性张量
+            position = torch.stack([targets['x'], targets['y'], targets['z']], dim=-1)  # [B, seq_len, 3]
+            rotation = torch.stack([targets['roll'], targets['pitch'], targets['yaw']], dim=-1)  # [B, seq_len, 3]
+            size = torch.stack([targets['l'], targets['w'], targets['h']], dim=-1)  # [B, seq_len, 3]
+            
             predicted_output = model.forward_with_predictions(
-                x=targets['x'],
-                y=targets['y'],
-                z=targets['z'],
-                w=targets['w'],
-                h=targets['h'],
-                l=targets['l'],
-                roll=targets['roll'],
-                pitch=targets['pitch'],
-                yaw=targets['yaw'],
+                position=position,
+                rotation=rotation,
+                size=size,
                 image=rgbxyz
             )
         
@@ -771,16 +785,15 @@ class AdvancedTrainer:
                     ], dim=0)
         
         # ===== 使用混合序列进行前向传播（保持梯度） =====
+        # 构建3属性张量
+        position = torch.stack([mixed_inputs['x'], mixed_inputs['y'], mixed_inputs['z']], dim=-1)  # [B, seq_len, 3]
+        rotation = torch.stack([targets['roll'], targets['pitch'], targets['yaw']], dim=-1)  # [B, seq_len, 3]
+        size = torch.stack([mixed_inputs['l'], mixed_inputs['w'], mixed_inputs['h']], dim=-1)  # [B, seq_len, 3]
+        
         return model.forward_with_predictions(
-            x=mixed_inputs['x'],
-            y=mixed_inputs['y'],
-            z=mixed_inputs['z'],
-            w=mixed_inputs['w'],
-            h=mixed_inputs['h'],
-            l=mixed_inputs['l'],
-            roll=targets['roll'],      # 添加旋转参数
-            pitch=targets['pitch'],    # 添加旋转参数
-            yaw=targets['yaw'],        # 添加旋转参数
+            position=position,
+            rotation=rotation,
+            size=size,
             image=rgbxyz
         )
     

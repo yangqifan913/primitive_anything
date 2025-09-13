@@ -31,21 +31,21 @@ training:
   # 训练阶段配置 - 减少过拟合风险
   phases:
     teacher_forcing:
-      epochs: 30              # 减少从20->15
+      epochs: 3              # 减少从20->15
       teacher_forcing_ratio: 1.0
       scheduled_sampling: false
       sampling_strategy: "none"
       description: "完全Teacher Forcing阶段"
     
     scheduled_sampling:
-      epochs: 40              # 减少从30->20
+      epochs: 3              # 减少从30->20
       teacher_forcing_ratio: 1.0  # 从1.0衰减到0
       scheduled_sampling: true
       sampling_strategy: "inverse_sigmoid"
       description: "Scheduled Sampling过渡阶段"
     
     pure_generation:
-      epochs: 50             # 大幅减少从250->100，防止过拟合
+      epochs: 3             # 大幅减少从250->100，防止过拟合
       teacher_forcing_ratio: 0.0
       scheduled_sampling: false
       sampling_strategy: "none"
@@ -62,7 +62,7 @@ training:
   # 学习率调度 - 更精细的调度策略
   scheduler:
     type: "CosineAnnealingWarmRestarts"  # 使用带重启的余弦退火
-    T_0: 50                  # 第一次重启的周期
+    T_0: 100                  # 第一次重启的周期
     T_mult: 2                 # 重启后周期倍增
     eta_min: 0.000001         # 最小学习率
   
@@ -134,8 +134,8 @@ model:
     depth: 6
     heads: 8
     dim_head: 64
-    attn_dropout: 0.1         # ✅ 实际生效：注意力dropout
-    ff_dropout: 0.1           # ✅ 实际生效：前馈dropout
+    attn_dropout: 0.0         # ✅ 实际生效：注意力dropout
+    ff_dropout: 0.0           # ✅ 实际生效：前馈dropout
     # use_rotary_emb: true
     # rotary_emb_dim: 32
   
@@ -185,7 +185,7 @@ model:
 data:
   # 数据集设置
   dataset:
-    data_root: "sim_data_bak"
+    data_root: "sim_data"
     
   # 3D属性范围 - 3个属性
   continuous_ranges:
@@ -195,8 +195,8 @@ data:
   
   # DataLoader设置
   dataloader:
-    batch_size: 16
-    num_workers: 4
+    batch_size: 2
+    num_workers: 2
     pin_memory: true
     prefetch_factor: 2
     persistent_workers: true
