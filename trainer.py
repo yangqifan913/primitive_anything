@@ -1244,7 +1244,8 @@ class AdvancedTrainer:
                     gen_results = model.generate_incremental(
                         image=rgbxyz,
                         max_seq_len=max_len,
-                        temperature=self.incremental_temperature
+                        temperature=self.incremental_temperature,
+                        eos_threshold=self.eos_threshold
                     )
                 else:
                     # 使用传统推理方法
@@ -1465,12 +1466,27 @@ class AdvancedTrainer:
         """将分类logits和delta组合成连续预测值"""
         # 获取属性的配置（从ConfigLoader返回的平铺结构中获取）
         attr_configs = {
-            'position': (self.model_config.get('num_discrete_position', 64), 
-                        self.model_config.get('continuous_range_position', [[0.5, 2.5], [-2.0, 2.0], [-1.5, 1.5]])),
-            'rotation': (self.model_config.get('num_discrete_rotation', 64), 
-                        self.model_config.get('continuous_range_rotation', [[-1.5708, 1.5708], [-1.5708, 1.5708], [-1.5708, 1.5708]])),
-            'size': (self.model_config.get('num_discrete_size', 64), 
-                    self.model_config.get('continuous_range_size', [[0.1, 1.0], [0.1, 1.0], [0.1, 1.0]]))
+            # 位置属性
+            'x': (self.model_config.get('num_discrete_position', 64), 
+                  self.model_config.get('continuous_range_position', [[0.5, 2.5], [-2.0, 2.0], [-1.5, 1.5]])[0]),
+            'y': (self.model_config.get('num_discrete_position', 64), 
+                  self.model_config.get('continuous_range_position', [[0.5, 2.5], [-2.0, 2.0], [-1.5, 1.5]])[1]),
+            'z': (self.model_config.get('num_discrete_position', 64), 
+                  self.model_config.get('continuous_range_position', [[0.5, 2.5], [-2.0, 2.0], [-1.5, 1.5]])[2]),
+            # 旋转属性
+            'roll': (self.model_config.get('num_discrete_rotation', 64), 
+                     self.model_config.get('continuous_range_rotation', [[-1.5708, 1.5708], [-1.5708, 1.5708], [-1.5708, 1.5708]])[0]),
+            'pitch': (self.model_config.get('num_discrete_rotation', 64), 
+                      self.model_config.get('continuous_range_rotation', [[-1.5708, 1.5708], [-1.5708, 1.5708], [-1.5708, 1.5708]])[1]),
+            'yaw': (self.model_config.get('num_discrete_rotation', 64), 
+                    self.model_config.get('continuous_range_rotation', [[-1.5708, 1.5708], [-1.5708, 1.5708], [-1.5708, 1.5708]])[2]),
+            # 尺寸属性
+            'w': (self.model_config.get('num_discrete_size', 64), 
+                  self.model_config.get('continuous_range_size', [[0.1, 1.0], [0.1, 1.0], [0.1, 1.0]])[0]),
+            'h': (self.model_config.get('num_discrete_size', 64), 
+                  self.model_config.get('continuous_range_size', [[0.1, 1.0], [0.1, 1.0], [0.1, 1.0]])[1]),
+            'l': (self.model_config.get('num_discrete_size', 64), 
+                  self.model_config.get('continuous_range_size', [[0.1, 1.0], [0.1, 1.0], [0.1, 1.0]])[2])
         }
         
         num_bins, value_range = attr_configs[attr]
@@ -2173,7 +2189,8 @@ class AdvancedTrainer:
                         gen_results = model.generate_incremental(
                             image=rgbxyz,
                             max_seq_len=max_len,
-                            temperature=self.incremental_temperature
+                            temperature=self.incremental_temperature,
+                            eos_threshold=self.eos_threshold
                         )
                     else:
                         # 使用传统推理方法
@@ -2198,17 +2215,38 @@ class AdvancedTrainer:
                         print(f"  📊 输入图像范围: [{rgbxyz.min().item():.4f}, {rgbxyz.max().item():.4f}]")
                     continue
                 
-                # 计算生成指标
-                gen_metrics = self._compute_generation_metrics(gen_results, targets, None, verbose=False)
+                # 计算每个样本的生成指标
+                batch_size = targets['x'].size(0)
+                for sample_idx in range(batch_size):
+                    # 提取单个样本的结果
+                    sample_gen_results = {}
+                    sample_targets = {}
+                    
+                    for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
+                        if attr in gen_results:
+                            sample_gen_results[attr] = gen_results[attr][sample_idx:sample_idx+1]  # [1, seq_len]
+                        if attr in targets:
+                            sample_targets[attr] = targets[attr][sample_idx:sample_idx+1]  # [1, seq_len]
+                    
+                    # 计算单个样本的指标
+                    sample_metrics = self._compute_generation_metrics(sample_gen_results, sample_targets, None, verbose=False)
+                    
+                    # 打印每个样本的结果
+                    if self.is_main_process:
+                        actual_sample_idx = batch_idx * batch_size + sample_idx + 1
+                        print(f"   Test Sample {actual_sample_idx}: Mean IoU = {sample_metrics['iou']:.4f} ({sample_metrics['num_generated_boxes']:.0f} boxes)")
+                    
+                    # 累积统计
+                    total_gen_iou += sample_metrics['iou']
+                    total_generated_boxes += sample_metrics['num_generated_boxes']
+                    total_gt_boxes += sample_metrics['num_gt_boxes']
                 
-                # 在test推理时打印每个sample的IoU
-                if self.is_main_process:
-                    print(f"   Test Sample {batch_idx + 1}: Mean IoU = {gen_metrics['iou']:.4f} ({gen_metrics['num_generated_boxes']:.0f} boxes)")
-                
-                # 累积统计
-                total_gen_iou += gen_metrics['iou']
-                total_generated_boxes += gen_metrics['num_generated_boxes']
-                total_gt_boxes += gen_metrics['num_gt_boxes']
+                # 计算batch平均指标（用于后续统计）
+                gen_metrics = {
+                    'iou': total_gen_iou / batch_size if batch_size > 0 else 0.0,
+                    'num_generated_boxes': total_generated_boxes / batch_size if batch_size > 0 else 0.0,
+                    'num_gt_boxes': total_gt_boxes / batch_size if batch_size > 0 else 0.0
+                }
                 total_x_error += gen_metrics['x_error']
                 total_y_error += gen_metrics['y_error']
                 total_z_error += gen_metrics['z_error']

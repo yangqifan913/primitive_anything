@@ -1272,6 +1272,9 @@ class PrimitiveTransformer3D(nn.Module):
                 state.generated_boxes['w'][i].append(size_continuous[i:i+1, 0:1])
                 state.generated_boxes['h'][i].append(size_continuous[i:i+1, 1:2])
                 state.generated_boxes['l'][i].append(size_continuous[i:i+1, 2:3])
+            else:
+                # 样本被停止，不保存预测值
+                pass
         
         # 🔧 修复Bug: 更新current_sequence以便下一步使用
         # 构建下一步的输入embedding - 使用新的3属性结构
@@ -1360,6 +1363,10 @@ class PrimitiveTransformer3D(nn.Module):
         # 转换结果为张量格式
         results = self._convert_incremental_results_to_tensors(state.generated_boxes, batch_size, device)
         
+        # 检查结果是否有效
+        if results is None:
+            return None
+        
         if return_state:
             return results, state
         else:
@@ -1382,5 +1389,8 @@ class PrimitiveTransformer3D(nn.Module):
                     # 连接tensor列表，每个元素是[1]形状的tensor，然后squeeze为[seq_len]
                     concatenated = torch.cat(generated_boxes[attr][i], dim=0)  # [seq_len, 1]
                     result[attr][i, :seq_len] = concatenated.squeeze(-1)  # [seq_len]
+                else:
+                    # seq_len为0，保持初始化的默认值
+                    pass
         
         return result 
