@@ -605,17 +605,17 @@ class AdvancedTrainer:
         batch_size = batch['x'].shape[0]
         device = batch['x'].device
         
-        # 初始化目标数据
+        # 初始化目标数据（batch已经在正确的设备上）
         targets = {
-            'x': batch['x'].to(device),
-            'y': batch['y'].to(device),
-            'z': batch['z'].to(device),
-            'w': batch['w'].to(device),
-            'h': batch['h'].to(device),
-            'l': batch['l'].to(device),
-            'roll': batch['roll'].to(device),
-            'pitch': batch['pitch'].to(device),
-            'yaw': batch['yaw'].to(device),
+            'x': batch['x'].clone(),
+            'y': batch['y'].clone(),
+            'z': batch['z'].clone(),
+            'w': batch['w'].clone(),
+            'h': batch['h'].clone(),
+            'l': batch['l'].clone(),
+            'roll': batch['roll'].clone(),
+            'pitch': batch['pitch'].clone(),
+            'yaw': batch['yaw'].clone(),
         }
         
         # 如果有等价表示，进行优化
@@ -629,18 +629,21 @@ class AdvancedTrainer:
                     if batch['x'][b, s] == self.pad_id:
                         continue
                     
-                    # 构建预测box
-                    pred_box = [
-                        outputs['continuous_dict']['x_continuous'][b, s].item(),
-                        outputs['continuous_dict']['y_continuous'][b, s].item(),
-                        outputs['continuous_dict']['z_continuous'][b, s].item(),
-                        outputs['continuous_dict']['l_continuous'][b, s].item(),
-                        outputs['continuous_dict']['w_continuous'][b, s].item(),
-                        outputs['continuous_dict']['h_continuous'][b, s].item(),
-                        outputs['continuous_dict']['roll_continuous'][b, s].item(),
-                        outputs['continuous_dict']['pitch_continuous'][b, s].item(),
-                        outputs['continuous_dict']['yaw_continuous'][b, s].item(),
-                    ]
+                    # 构建预测box（保持张量格式，避免设备不匹配）
+                    pred_box_tensor = torch.stack([
+                        outputs['continuous_dict']['x_continuous'][b, s],
+                        outputs['continuous_dict']['y_continuous'][b, s],
+                        outputs['continuous_dict']['z_continuous'][b, s],
+                        outputs['continuous_dict']['l_continuous'][b, s],
+                        outputs['continuous_dict']['w_continuous'][b, s],
+                        outputs['continuous_dict']['h_continuous'][b, s],
+                        outputs['continuous_dict']['roll_continuous'][b, s],
+                        outputs['continuous_dict']['pitch_continuous'][b, s],
+                        outputs['continuous_dict']['yaw_continuous'][b, s],
+                    ], dim=0)  # [9]
+                    
+                    # 转换为Python列表用于等价box选择
+                    pred_box = pred_box_tensor.detach().cpu().numpy().tolist()
                     
                     # 获取该box的等价表示
                     if s < len(equivalent_boxes[b]):
@@ -649,16 +652,17 @@ class AdvancedTrainer:
                         # 选择最优的等价表示
                         best_box, min_loss = select_best_equivalent_representation(pred_box, equiv_boxes)
                         
-                        # 更新目标数据
-                        targets['x'][b, s] = best_box[0]
-                        targets['y'][b, s] = best_box[1]
-                        targets['z'][b, s] = best_box[2]
-                        targets['l'][b, s] = best_box[3]
-                        targets['w'][b, s] = best_box[4]
-                        targets['h'][b, s] = best_box[5]
-                        targets['roll'][b, s] = best_box[6]
-                        targets['pitch'][b, s] = best_box[7]
-                        targets['yaw'][b, s] = best_box[8]
+                        # 更新目标数据（确保在正确的设备上）
+                        device = targets['x'].device
+                        targets['x'][b, s] = torch.tensor(best_box[0], device=device, dtype=targets['x'].dtype)
+                        targets['y'][b, s] = torch.tensor(best_box[1], device=device, dtype=targets['y'].dtype)
+                        targets['z'][b, s] = torch.tensor(best_box[2], device=device, dtype=targets['z'].dtype)
+                        targets['l'][b, s] = torch.tensor(best_box[3], device=device, dtype=targets['l'].dtype)
+                        targets['w'][b, s] = torch.tensor(best_box[4], device=device, dtype=targets['w'].dtype)
+                        targets['h'][b, s] = torch.tensor(best_box[5], device=device, dtype=targets['h'].dtype)
+                        targets['roll'][b, s] = torch.tensor(best_box[6], device=device, dtype=targets['roll'].dtype)
+                        targets['pitch'][b, s] = torch.tensor(best_box[7], device=device, dtype=targets['pitch'].dtype)
+                        targets['yaw'][b, s] = torch.tensor(best_box[8], device=device, dtype=targets['yaw'].dtype)
         
         return targets
     
@@ -904,50 +908,96 @@ class AdvancedTrainer:
             # 预测下一个token（只需要最后一个位置）
             step_embed = attended_codes[:, -1, :]
             
-            # 预测各个属性（保持梯度，使用Gumbel Softmax）
+            # 预测3个属性（保持梯度，使用Gumbel Softmax）
             gumbel_temp = self.incremental_temperature
-            x_logits, x_delta, x_continuous, x_embed = model.predict_attribute_with_continuous_embed(step_embed, 'x', prev_embeds=None, use_gumbel=True, temperature=gumbel_temp)
-            y_logits, y_delta, y_continuous, y_embed = model.predict_attribute_with_continuous_embed(step_embed, 'y', prev_embeds=[x_embed], use_gumbel=True, temperature=gumbel_temp)
-            z_logits, z_delta, z_continuous, z_embed = model.predict_attribute_with_continuous_embed(step_embed, 'z', prev_embeds=[x_embed, y_embed], use_gumbel=True, temperature=gumbel_temp)
-            w_logits, w_delta, w_continuous, w_embed = model.predict_attribute_with_continuous_embed(step_embed, 'w', prev_embeds=[x_embed, y_embed, z_embed], use_gumbel=True, temperature=gumbel_temp)
-            h_logits, h_delta, h_continuous, h_embed = model.predict_attribute_with_continuous_embed(step_embed, 'h', prev_embeds=[x_embed, y_embed, z_embed, w_embed], use_gumbel=True, temperature=gumbel_temp)
-            l_logits, l_delta, l_continuous, l_embed = model.predict_attribute_with_continuous_embed(step_embed, 'l', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed], use_gumbel=True, temperature=gumbel_temp)
             
-            # 预测旋转属性（roll, pitch, yaw）
-            roll_logits, roll_delta, roll_continuous, roll_embed = model.predict_attribute_with_continuous_embed(step_embed, 'roll', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed], use_gumbel=True, temperature=gumbel_temp)
-            pitch_logits, pitch_delta, pitch_continuous, pitch_embed = model.predict_attribute_with_continuous_embed(step_embed, 'pitch', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed], use_gumbel=True, temperature=gumbel_temp)
-            yaw_logits, yaw_delta, yaw_continuous, yaw_embed = model.predict_attribute_with_continuous_embed(step_embed, 'yaw', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed], use_gumbel=True, temperature=gumbel_temp)
+            # 预测位置属性 (x, y, z)
+            pos_result = model.predict_3d_vector_with_continuous_embed(
+                step_embed, 'position', prev_embeds=None, use_gumbel=True, temperature=gumbel_temp
+            )
+            pos_logits = pos_result['logits']
+            pos_deltas = pos_result['deltas'] 
+            pos_continuous = pos_result['continuous']
+            pos_embeds = [pos_result['embed']]
             
-            # EOS预测
-            eos_logits = model.to_eos_logits(step_embed).squeeze(-1)
+            # 预测旋转属性 (roll, pitch, yaw)
+            rot_result = model.predict_3d_vector_with_continuous_embed(
+                step_embed, 'rotation', prev_embeds=pos_embeds, use_gumbel=True, temperature=gumbel_temp
+            )
+            rot_logits = rot_result['logits']
+            rot_deltas = rot_result['deltas']
+            rot_continuous = rot_result['continuous']
+            rot_embeds = [rot_result['embed']]
+            
+            # 预测尺寸属性 (w, h, l)
+            size_result = model.predict_3d_vector_with_continuous_embed(
+                step_embed, 'size', prev_embeds=pos_embeds + rot_embeds, use_gumbel=True, temperature=gumbel_temp
+            )
+            size_logits = size_result['logits']
+            size_deltas = size_result['deltas']
+            size_continuous = size_result['continuous'] 
+            size_embeds = [size_result['embed']]
+            
+            # 将3D向量分解为单独属性
+            x_continuous, y_continuous, z_continuous = pos_continuous[:, 0], pos_continuous[:, 1], pos_continuous[:, 2]
+            w_continuous, h_continuous, l_continuous = size_continuous[:, 0], size_continuous[:, 1], size_continuous[:, 2]
+            roll_continuous, pitch_continuous, yaw_continuous = rot_continuous[:, 0], rot_continuous[:, 1], rot_continuous[:, 2]
+            
+            # EOS预测 - 需要所有属性的embedding
+            eos_input = torch.cat([step_embed] + pos_embeds + rot_embeds + size_embeds, dim=-1)
+            eos_logits = model.to_eos_logits(eos_input).squeeze(-1)
             
             # 保存这一步的输出
+            # 位置属性 (x, y, z) - pos_logits是[B, sum(num_bins)]形状，需要按维度分割
+            num_bins = model.num_discrete_position
+            x_logits = pos_logits[:, 0:num_bins]  # [B, num_bins]
+            y_logits = pos_logits[:, num_bins:2*num_bins]  # [B, num_bins]
+            z_logits = pos_logits[:, 2*num_bins:3*num_bins]  # [B, num_bins]
+            
             all_logits['x_logits'].append(x_logits)
             all_logits['y_logits'].append(y_logits)
             all_logits['z_logits'].append(z_logits)
-            all_logits['w_logits'].append(w_logits)
-            all_logits['h_logits'].append(h_logits)
-            all_logits['l_logits'].append(l_logits)
-            all_logits['roll_logits'].append(roll_logits)
-            all_logits['pitch_logits'].append(pitch_logits)
-            all_logits['yaw_logits'].append(yaw_logits)
             
-            all_deltas['x_delta'].append(x_delta)
-            all_deltas['y_delta'].append(y_delta)
-            all_deltas['z_delta'].append(z_delta)
-            all_deltas['w_delta'].append(w_delta)
-            all_deltas['h_delta'].append(h_delta)
-            all_deltas['l_delta'].append(l_delta)
-            all_deltas['roll_delta'].append(roll_delta)
-            all_deltas['pitch_delta'].append(pitch_delta)
-            all_deltas['yaw_delta'].append(yaw_delta)
+            all_deltas['x_delta'].append(pos_deltas[:, 0])
+            all_deltas['y_delta'].append(pos_deltas[:, 1])
+            all_deltas['z_delta'].append(pos_deltas[:, 2])
             
             all_continuous['x_continuous'].append(x_continuous)
             all_continuous['y_continuous'].append(y_continuous)
             all_continuous['z_continuous'].append(z_continuous)
+            
+            # 尺寸属性 (w, h, l) - size_logits是[B, sum(num_bins)]形状，需要按维度分割
+            size_num_bins = model.num_discrete_size
+            w_logits = size_logits[:, 0:size_num_bins]  # [B, num_bins]
+            h_logits = size_logits[:, size_num_bins:2*size_num_bins]  # [B, num_bins]
+            l_logits = size_logits[:, 2*size_num_bins:3*size_num_bins]  # [B, num_bins]
+            
+            all_logits['w_logits'].append(w_logits)
+            all_logits['h_logits'].append(h_logits)
+            all_logits['l_logits'].append(l_logits)
+            
+            all_deltas['w_delta'].append(size_deltas[:, 0])
+            all_deltas['h_delta'].append(size_deltas[:, 1])
+            all_deltas['l_delta'].append(size_deltas[:, 2])
+            
             all_continuous['w_continuous'].append(w_continuous)
             all_continuous['h_continuous'].append(h_continuous)
             all_continuous['l_continuous'].append(l_continuous)
+            
+            # 旋转属性 (roll, pitch, yaw) - rot_logits是[B, sum(num_bins)]形状，需要按维度分割
+            rot_num_bins = model.num_discrete_rotation
+            roll_logits = rot_logits[:, 0:rot_num_bins]  # [B, num_bins]
+            pitch_logits = rot_logits[:, rot_num_bins:2*rot_num_bins]  # [B, num_bins]
+            yaw_logits = rot_logits[:, 2*rot_num_bins:3*rot_num_bins]  # [B, num_bins]
+            
+            all_logits['roll_logits'].append(roll_logits)
+            all_logits['pitch_logits'].append(pitch_logits)
+            all_logits['yaw_logits'].append(yaw_logits)
+            
+            all_deltas['roll_delta'].append(rot_deltas[:, 0])
+            all_deltas['pitch_delta'].append(rot_deltas[:, 1])
+            all_deltas['yaw_delta'].append(rot_deltas[:, 2])
+            
             all_continuous['roll_continuous'].append(roll_continuous)
             all_continuous['pitch_continuous'].append(pitch_continuous)
             all_continuous['yaw_continuous'].append(yaw_continuous)
@@ -955,22 +1005,9 @@ class AdvancedTrainer:
             all_eos_logits.append(eos_logits)
             
             # 构建下一步的输入：当前token + 预测的连续值
-            # 这里需要创建新的embedding来加入到序列中
-            next_embeds = []
-            for attr, continuous_val in [('x', x_continuous), ('y', y_continuous), ('z', z_continuous), 
-                                       ('w', w_continuous), ('h', h_continuous), ('l', l_continuous),
-                                       ('roll', roll_continuous), ('pitch', pitch_continuous), ('yaw', yaw_continuous)]:
-                # 获取对应的离散化参数
-                num_discrete = getattr(model, f'num_discrete_{attr}')
-                continuous_range = getattr(model, f'continuous_range_{attr}')
-                
-                # 离散化连续值
-                attr_discrete = model.discretize(continuous_val, num_discrete, continuous_range)
-                attr_embed = getattr(model, f'{attr}_embed')(attr_discrete)
-                next_embeds.append(attr_embed)
-            
-            # 组合所有属性的embedding
-            combined_embed = torch.cat(next_embeds, dim=-1)  # [B, total_embed_dim]
+            # 现在我们有3D向量的embeds，直接组合（顺序：位置+旋转+尺寸）
+            combined_embeds = pos_embeds + rot_embeds + size_embeds
+            combined_embed = torch.cat(combined_embeds, dim=-1)  # [B, total_embed_dim]
             projected_embed = model.project_in(combined_embed).unsqueeze(1)  # [B, 1, model_dim]
             
             # 更新当前序列（保持梯度）
@@ -1032,6 +1069,9 @@ class AdvancedTrainer:
         
         for batch_idx, batch in enumerate(self.train_loader):
             self.optimizer.zero_grad()
+            
+            # 将batch移动到正确的设备
+            batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             
             with autocast(enabled=self.use_amp):
                 # 前向传播
@@ -1490,11 +1530,11 @@ class AdvancedTrainer:
             # 计算IoU
             gen_iou = self._compute_generation_iou(processed_gen_results, targets, verbose)
             
-            # 计算6个维度的平均误差
+            # 计算9个维度的平均误差（包括旋转角度）
             dimension_errors = {}
             total_valid_predictions = 0
             
-            for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+            for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
                 if attr in processed_gen_results and attr in targets:
                     # 获取生成结果和目标值
                     gen_values = processed_gen_results[attr]  # [B, seq_len]
@@ -1519,7 +1559,7 @@ class AdvancedTrainer:
             
             # 计算总体平均误差
             if total_valid_predictions > 0:
-                overall_mean_error = sum(dimension_errors.values()) / 6.0
+                overall_mean_error = sum(dimension_errors.values()) / 9.0  # 9个维度
             else:
                 overall_mean_error = 0.0
             
@@ -1686,58 +1726,13 @@ class AdvancedTrainer:
         Returns:
             IoU值 (0.0-1.0)
         """
-        try:
-            # 如果没有旋转信息，回退到AABB计算
-            if rot1 is None or rot2 is None:
-                return self._compute_simple_aabb_iou(box1, box2)
-            
-            # 使用OBB IoU计算
-            return self._compute_obb_iou(box1, box2, rot1, rot2)
-        except Exception as e:
-            print(f"⚠️  计算OBB IoU时出错: {e}")
-            # 出错时回退到AABB计算
-            return self._compute_simple_aabb_iou(box1, box2)
+        # 检查旋转信息是否完整
+        if rot1 is None or rot2 is None:
+            raise ValueError("旋转信息缺失，无法计算OBB IoU")
+        
+        # 使用OBB IoU计算
+        return self._compute_obb_iou(box1, box2, rot1, rot2)
     
-    def _compute_simple_aabb_iou(self, box1: List[float], box2: List[float]) -> float:
-        """计算两个轴对齐box的IoU"""
-        try:
-            # 确保box格式正确
-            if len(box1) != 6 or len(box2) != 6:
-                print(f"⚠️  Box格式错误: box1长度={len(box1)}, box2长度={len(box2)}")
-                return 0.0
-                
-            x1, y1, z1, w1, h1, l1 = box1
-            x2, y2, z2, w2, h2, l2 = box2
-            
-            # 计算边界
-            x1_min, x1_max = x1 - w1/2, x1 + w1/2
-            y1_min, y1_max = y1 - h1/2, y1 + h1/2
-            z1_min, z1_max = z1 - l1/2, z1 + l1/2
-            
-            x2_min, x2_max = x2 - w2/2, x2 + w2/2
-            y2_min, y2_max = y2 - h2/2, y2 + h2/2
-            z2_min, z2_max = z2 - l2/2, z2 + l2/2
-            
-            # 计算交集（使用正确的逻辑）
-            inter_x = max(0, min(x1_max, x2_max) - max(x1_min, x2_min))
-            inter_y = max(0, min(y1_max, y2_max) - max(y1_min, y2_min))
-            inter_z = max(0, min(z1_max, z2_max) - max(z1_min, z2_min))
-            
-            # 计算体积
-            inter_volume = inter_x * inter_y * inter_z
-            volume1 = w1 * h1 * l1
-            volume2 = w2 * h2 * l2
-            union_volume = volume1 + volume2 - inter_volume
-            
-            if union_volume <= 0:
-                return 0.0
-                
-            iou = inter_volume / union_volume
-            return max(0.0, min(1.0, iou))  # 确保在[0,1]范围内
-            
-        except Exception as e:
-            print(f"轴对齐IoU计算出错: {e}")
-            return 0.0
     
     def _compute_obb_iou(self, box1: List[float], box2: List[float], rot1: List[float], rot2: List[float]) -> float:
         """
@@ -1796,6 +1791,10 @@ class AdvancedTrainer:
             
             # 计算两个OBB的凸包
             try:
+                # 验证顶点数据的有效性
+                if not self._validate_vertices(vertices1) or not self._validate_vertices(vertices2):
+                    raise ValueError("顶点数据无效，无法计算OBB IoU")
+                
                 hull1 = ConvexHull(vertices1)
                 hull2 = ConvexHull(vertices2)
                 
@@ -1808,14 +1807,45 @@ class AdvancedTrainer:
                 return self._compute_obb_intersection_volume(vertices1, vertices2, volume1, volume2)
                 
             except Exception as e:
-                print(f"⚠️  凸包计算出错: {e}")
-                # 回退到AABB计算
-                return self._compute_simple_aabb_iou(box1, box2)
+                raise RuntimeError(f"凸包计算出错: {e}")
                 
         except Exception as e:
-            print(f"⚠️  OBB IoU计算出错: {e}")
-            # 回退到AABB计算
-            return self._compute_simple_aabb_iou(box1, box2)
+            raise RuntimeError(f"OBB IoU计算出错: {e}")
+    
+    def _validate_vertices(self, vertices):
+        """
+        验证顶点数据的有效性
+        Args:
+            vertices: [8, 3] 顶点坐标
+        Returns:
+            bool: 是否有效
+        """
+        try:
+            # 检查是否有足够的点
+            if len(vertices) < 4:
+                return False
+            
+            # 检查是否有重复点
+            unique_vertices = np.unique(vertices, axis=0)
+            if len(unique_vertices) < 4:
+                return False
+            
+            # 检查是否有NaN或Inf值
+            if np.any(np.isnan(vertices)) or np.any(np.isinf(vertices)):
+                return False
+            
+            # 检查点是否共面（简化检查）
+            if len(unique_vertices) == 4:
+                # 如果只有4个唯一点，检查是否共面
+                vectors = unique_vertices[1:] - unique_vertices[0]
+                if np.linalg.matrix_rank(vectors) < 3:
+                    return False
+            
+            return True
+            
+        except Exception:
+            return False
+    
     
     def _compute_obb_intersection_volume(self, vertices1: np.ndarray, vertices2: np.ndarray, volume1: float, volume2: float) -> float:
         """
@@ -2383,6 +2413,9 @@ class AdvancedTrainer:
                         'test_best_val/w_error': test_results.get('avg_w_error', 0.0),
                         'test_best_val/h_error': test_results.get('avg_h_error', 0.0),
                         'test_best_val/l_error': test_results.get('avg_l_error', 0.0),
+                        'test_best_val/roll_error': test_results.get('avg_roll_error', 0.0),
+                        'test_best_val/pitch_error': test_results.get('avg_pitch_error', 0.0),
+                        'test_best_val/yaw_error': test_results.get('avg_yaw_error', 0.0),
                         'test_best_val/avg_generated_boxes': test_results.get('avg_generated_boxes', 0.0),
                         'test_best_val/avg_gt_boxes': test_results.get('avg_gt_boxes', 0.0),
                         'test_best_val/generation_rate': test_results.get('avg_generated_boxes', 0.0) / max(test_results.get('avg_gt_boxes', 1), 1),
@@ -2400,6 +2433,9 @@ class AdvancedTrainer:
                         'test_best_gen/w_error': test_results.get('avg_w_error', 0.0),
                         'test_best_gen/h_error': test_results.get('avg_h_error', 0.0),
                         'test_best_gen/l_error': test_results.get('avg_l_error', 0.0),
+                        'test_best_gen/roll_error': test_results.get('avg_roll_error', 0.0),
+                        'test_best_gen/pitch_error': test_results.get('avg_pitch_error', 0.0),
+                        'test_best_gen/yaw_error': test_results.get('avg_yaw_error', 0.0),
                         'test_best_gen/avg_generated_boxes': test_results.get('avg_generated_boxes', 0.0),
                         'test_best_gen/avg_gt_boxes': test_results.get('avg_gt_boxes', 0.0),
                         'test_best_gen/generation_rate': test_results.get('avg_generated_boxes', 0.0) / max(test_results.get('avg_gt_boxes', 1), 1),
@@ -2528,6 +2564,9 @@ class AdvancedTrainer:
                         'val/w_error': val_results.get('avg_w_error', 0.0),
                         'val/h_error': val_results.get('avg_h_error', 0.0),
                         'val/l_error': val_results.get('avg_l_error', 0.0),
+                        'val/roll_error': val_results.get('avg_roll_error', 0.0),
+                        'val/pitch_error': val_results.get('avg_pitch_error', 0.0),
+                        'val/yaw_error': val_results.get('avg_yaw_error', 0.0),
                         
                         # 训练参数
                         'train/teacher_forcing_ratio': train_stats.teacher_forcing_ratio,
@@ -2602,6 +2641,9 @@ class AdvancedTrainer:
                 'test/w_error': test_results.get('avg_w_error', 0.0),
                 'test/h_error': test_results.get('avg_h_error', 0.0),
                 'test/l_error': test_results.get('avg_l_error', 0.0),
+                'test/roll_error': test_results.get('avg_roll_error', 0.0),
+                'test/pitch_error': test_results.get('avg_pitch_error', 0.0),
+                'test/yaw_error': test_results.get('avg_yaw_error', 0.0),
                 'test/avg_generated_boxes': test_results.get('avg_generated_boxes', 0.0),
                 'test/avg_gt_boxes': test_results.get('avg_gt_boxes', 0.0),
                 'test/generation_rate': test_results.get('avg_generated_boxes', 0.0) / max(test_results.get('avg_gt_boxes', 1), 1)

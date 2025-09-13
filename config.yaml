@@ -31,21 +31,21 @@ training:
   # 训练阶段配置 - 减少过拟合风险
   phases:
     teacher_forcing:
-      epochs: 3              # 减少从20->15
+      epochs: 1              # 减少从20->15
       teacher_forcing_ratio: 1.0
       scheduled_sampling: false
       sampling_strategy: "none"
       description: "完全Teacher Forcing阶段"
     
     scheduled_sampling:
-      epochs: 3              # 减少从30->20
+      epochs: 1              # 减少从30->20
       teacher_forcing_ratio: 1.0  # 从1.0衰减到0
       scheduled_sampling: true
       sampling_strategy: "inverse_sigmoid"
       description: "Scheduled Sampling过渡阶段"
     
     pure_generation:
-      epochs: 3             # 大幅减少从250->100，防止过拟合
+      epochs: 1             # 大幅减少从250->100，防止过拟合
       teacher_forcing_ratio: 0.0
       scheduled_sampling: false
       sampling_strategy: "none"

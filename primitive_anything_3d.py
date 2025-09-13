@@ -1208,10 +1208,14 @@ class PrimitiveTransformer3D(nn.Module):
         )
         pos_logits = pos_result['logits']
         pos_deltas = pos_result['deltas']
-        pos_continuous = pos_result['continuous']
+        pos_continuous = pos_result['continuous']  # [B, 3]
         pos_embeds = [pos_result['embed']]
         prev_embeds.extend(pos_embeds)
-        box_prediction.update(pos_continuous)
+        
+        # 将3维张量转换为字典格式
+        box_prediction['x'] = pos_continuous[:, 0]  # [B]
+        box_prediction['y'] = pos_continuous[:, 1]  # [B]
+        box_prediction['z'] = pos_continuous[:, 2]  # [B]
         
         # 2. 预测旋转向量 (roll, pitch, yaw)
         rot_result = self.predict_3d_vector_with_continuous_embed(
@@ -1219,10 +1223,14 @@ class PrimitiveTransformer3D(nn.Module):
         )
         rot_logits = rot_result['logits']
         rot_deltas = rot_result['deltas']
-        rot_continuous = rot_result['continuous']
+        rot_continuous = rot_result['continuous']  # [B, 3]
         rot_embeds = [rot_result['embed']]
         prev_embeds.extend(rot_embeds)
-        box_prediction.update(rot_continuous)
+        
+        # 将3维张量转换为字典格式
+        box_prediction['roll'] = rot_continuous[:, 0]  # [B]
+        box_prediction['pitch'] = rot_continuous[:, 1]  # [B]
+        box_prediction['yaw'] = rot_continuous[:, 2]  # [B]
         
         # 3. 预测尺寸向量 (w, h, l)
         size_result = self.predict_3d_vector_with_continuous_embed(
@@ -1230,10 +1238,14 @@ class PrimitiveTransformer3D(nn.Module):
         )
         size_logits = size_result['logits']
         size_deltas = size_result['deltas']
-        size_continuous = size_result['continuous']
+        size_continuous = size_result['continuous']  # [B, 3]
         size_embeds = [size_result['embed']]
         prev_embeds.extend(size_embeds)
-        box_prediction.update(size_continuous)
+        
+        # 将3维张量转换为字典格式
+        box_prediction['w'] = size_continuous[:, 0]  # [B]
+        box_prediction['h'] = size_continuous[:, 1]  # [B]
+        box_prediction['l'] = size_continuous[:, 2]  # [B]
         
         # EOS预测（更新输入维度）
         eos_logits = self.to_eos_logits(torch.cat([next_embed] + prev_embeds, dim=-1)).squeeze(-1)  # [B]
@@ -1367,7 +1379,8 @@ class PrimitiveTransformer3D(nn.Module):
             for i in range(batch_size):
                 seq_len = len(generated_boxes[attr][i])
                 if seq_len > 0:
-                    # 连接tensor列表，每个元素是[1]形状的tensor
-                    result[attr][i, :seq_len] = torch.cat(generated_boxes[attr][i], dim=0)
+                    # 连接tensor列表，每个元素是[1]形状的tensor，然后squeeze为[seq_len]
+                    concatenated = torch.cat(generated_boxes[attr][i], dim=0)  # [seq_len, 1]
+                    result[attr][i, :seq_len] = concatenated.squeeze(-1)  # [seq_len]
         
         return result 
