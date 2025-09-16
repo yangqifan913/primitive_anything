@@ -387,7 +387,7 @@ class PrimitiveTransformer3D(nn.Module):
         
         # 连续范围 - 3个属性
         continuous_range_position = [[0.5, 2.5], [-2, 2], [-1.5, 1.5]],  # 位置属性 (x, y, z)
-        continuous_range_rotation = [[-1.5708, 1.5708], [-1.5708, 1.5708], [-1.5708, 1.5708]],  # 旋转属性 (roll, pitch, yaw)
+        continuous_range_rotation = [[-1.0472, 1.0472], [-1.0472, 1.0472], [-1.0472, 1.0472]],  # 旋转属性 (roll, pitch, yaw) [-π, π] (弧度)
         continuous_range_size = [[0.3, 0.7], [0.3, 0.7], [0.3, 0.7]],  # 尺寸属性 (l, w, h)
         
         # 嵌入维度 - 3个属性，每个属性3维
@@ -1247,6 +1247,22 @@ class PrimitiveTransformer3D(nn.Module):
         box_prediction['h'] = size_continuous[:, 1]  # [B]
         box_prediction['l'] = size_continuous[:, 2]  # [B]
         
+        # 🔍 添加日志：检查尺寸预测结果
+        for i in range(batch_size):
+            if not state.stopped_samples[i]:
+                w_val = size_continuous[i, 0].item()
+                h_val = size_continuous[i, 1].item()
+                l_val = size_continuous[i, 2].item()
+                
+                if w_val <= 0 or h_val <= 0 or l_val <= 0:
+                    print(f"🚨 模型预测出无效尺寸 - Sample {i}:")
+                    print(f"   尺寸预测: w={w_val:.6f}, h={h_val:.6f}, l={l_val:.6f}")
+                    print(f"   位置预测: x={pos_continuous[i, 0].item():.6f}, y={pos_continuous[i, 1].item():.6f}, z={pos_continuous[i, 2].item():.6f}")
+                    print(f"   旋转预测: roll={rot_continuous[i, 0].item():.6f}, pitch={rot_continuous[i, 1].item():.6f}, yaw={rot_continuous[i, 2].item():.6f}")
+                    print(f"   尺寸logits: {size_logits[i].cpu().numpy()}")
+                    print(f"   尺寸deltas: {size_deltas[i].cpu().numpy()}")
+                    print(f"   尺寸continuous: {size_continuous[i].cpu().numpy()}")
+        
         # EOS预测（更新输入维度）
         eos_logits = self.to_eos_logits(torch.cat([next_embed] + prev_embeds, dim=-1)).squeeze(-1)  # [B]
         eos_probs = torch.sigmoid(eos_logits)
@@ -1381,7 +1397,8 @@ class PrimitiveTransformer3D(nn.Module):
         
         result = {}
         for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
-            result[attr] = torch.zeros(batch_size, max_len, device=device)
+            # 🔧 修复：使用padding值而不是0来初始化
+            result[attr] = torch.full((batch_size, max_len), -1.0, device=device)
             
             for i in range(batch_size):
                 seq_len = len(generated_boxes[attr][i])
@@ -1390,7 +1407,7 @@ class PrimitiveTransformer3D(nn.Module):
                     concatenated = torch.cat(generated_boxes[attr][i], dim=0)  # [seq_len, 1]
                     result[attr][i, :seq_len] = concatenated.squeeze(-1)  # [seq_len]
                 else:
-                    # seq_len为0，保持初始化的默认值
+                    # seq_len为0，使用padding值-1.0（与数据加载器一致）
                     pass
         
         return result 

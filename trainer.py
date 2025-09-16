@@ -37,7 +37,7 @@ from dataloader_3d import create_dataloader, generate_equivalent_box_representat
 
 def select_best_equivalent_representation(pred_box, equivalent_boxes):
     """
-    选择与预测box旋转L1 loss最小的等价表示
+    选择与预测box旋转角度误差最小的等价表示（过滤掉角度大于60度的等效box）
     
     Args:
         pred_box: 预测box (x, y, z, l, w, h, roll, pitch, yaw)
@@ -47,18 +47,48 @@ def select_best_equivalent_representation(pred_box, equivalent_boxes):
         best_box: 最优的等价表示
         min_loss: 最小旋转loss
     """
+    import math
+    
+    # 🔧 过滤掉任何角度大于180度的等效box
+    valid_equivalent_boxes = []
+    for equiv_box in equivalent_boxes:
+        roll, pitch, yaw = equiv_box[6], equiv_box[7], equiv_box[8]
+
+        if abs(roll) <= math.pi/3 and abs(pitch) <= math.pi/3 and abs(yaw) <= math.pi/3:
+            valid_equivalent_boxes.append(equiv_box)
+    
+    # 如果过滤后没有有效的等效box，报错
+    if len(valid_equivalent_boxes) == 0:
+        raise ValueError(f"❌ 错误：所有等效box都包含大于60度的角度！原始等效box数量: {len(equivalent_boxes)}")
+    
+    # 🔍 打印筛选统计信息
+    # print(f"     📊 等效box筛选统计: 原始={len(equivalent_boxes)}, 筛选后={len(valid_equivalent_boxes)}")
+    
     min_loss = float('inf')
-    best_box = equivalent_boxes[0]  # 默认选择第一个
+    best_box = valid_equivalent_boxes[0]  # 默认选择第一个有效box
     
     pred_roll, pred_pitch, pred_yaw = pred_box[6], pred_box[7], pred_box[8]
     
-    for equiv_box in equivalent_boxes:
+    # 确保角度值是标量，不是列表
+    if isinstance(pred_roll, list):
+        pred_roll = pred_roll[0]
+    if isinstance(pred_pitch, list):
+        pred_pitch = pred_pitch[0]
+    if isinstance(pred_yaw, list):
+        pred_yaw = pred_yaw[0]
+    
+    def angular_error(pred_angle, gt_angle):
+        """计算角度误差，简单L1 loss"""
+        return abs(pred_angle - gt_angle)
+    
+    # 只在有效的等效box中选择最优的
+    for equiv_box in valid_equivalent_boxes:
         gt_roll, gt_pitch, gt_yaw = equiv_box[6], equiv_box[7], equiv_box[8]
         
-        # 计算旋转L1 loss
-        roll_loss = abs(pred_roll - gt_roll)
-        pitch_loss = abs(pred_pitch - gt_pitch)
-        yaw_loss = abs(pred_yaw - gt_yaw)
+        # 计算简单L1 loss的旋转角度误差
+        roll_loss = angular_error(pred_roll, gt_roll)
+        pitch_loss = angular_error(pred_pitch, gt_pitch)
+        yaw_loss = angular_error(pred_yaw, gt_yaw)
         
         total_loss = roll_loss + pitch_loss + yaw_loss
         
@@ -100,6 +130,14 @@ class TrainingStats:
     adaptive_cls_weight: float
     adaptive_delta_weight: float
     epoch_time: float
+    
+    # 🔍 添加旋转角度损失统计
+    train_roll_cls_loss: float = 0.0
+    train_pitch_cls_loss: float = 0.0
+    train_yaw_cls_loss: float = 0.0
+    train_roll_delta_loss: float = 0.0
+    train_pitch_delta_loss: float = 0.0
+    train_yaw_delta_loss: float = 0.0
 
 
 class AdvancedTrainer:
@@ -304,7 +342,10 @@ class AdvancedTrainer:
             
             # 连续范围 - 3个属性
             continuous_range_position=continuous_ranges['position'],
-            continuous_range_rotation=continuous_ranges['rotation'],
+            # 🔧 修复：将角度制转换为弧度制
+            continuous_range_rotation=[[math.radians(continuous_ranges['rotation'][0][0]), math.radians(continuous_ranges['rotation'][0][1])],
+                                      [math.radians(continuous_ranges['rotation'][1][0]), math.radians(continuous_ranges['rotation'][1][1])],
+                                      [math.radians(continuous_ranges['rotation'][2][0]), math.radians(continuous_ranges['rotation'][2][1])]],
             continuous_range_size=continuous_ranges['size'],
             
             # 嵌入维度 - 3个属性
@@ -561,9 +602,10 @@ class AdvancedTrainer:
             continuous_range_w=continuous_ranges['size'][0],
             continuous_range_h=continuous_ranges['size'][1],
             continuous_range_l=continuous_ranges['size'][2],
-            continuous_range_roll=continuous_ranges['rotation'][0],
-            continuous_range_pitch=continuous_ranges['rotation'][1],
-            continuous_range_yaw=continuous_ranges['rotation'][2],
+            # 🔧 修复：将角度制转换为弧度制 [-180°, 180°] -> [-π, π]
+            continuous_range_roll=[math.radians(continuous_ranges['rotation'][0][0]), math.radians(continuous_ranges['rotation'][0][1])],
+            continuous_range_pitch=[math.radians(continuous_ranges['rotation'][1][0]), math.radians(continuous_ranges['rotation'][1][1])],
+            continuous_range_yaw=[math.radians(continuous_ranges['rotation'][2][0]), math.radians(continuous_ranges['rotation'][2][1])],
             
             # 基础损失权重
             base_classification_weight=base_weights['classification'],
@@ -644,6 +686,10 @@ class AdvancedTrainer:
                     
                     # 转换为Python列表用于等价box选择
                     pred_box = pred_box_tensor.detach().cpu().numpy().tolist()
+                    
+                    # 确保pred_box是扁平的列表，不是嵌套列表
+                    if isinstance(pred_box[6], list):
+                        pred_box = [item[0] if isinstance(item, list) else item for item in pred_box]
                     
                     # 获取该box的等价表示
                     if s < len(equivalent_boxes[b]):
@@ -1063,6 +1109,15 @@ class AdvancedTrainer:
         total_mean_iou = 0.0
         total_adaptive_cls_weight = 0.0
         total_adaptive_delta_weight = 0.0
+        
+        # 🔍 初始化旋转角度损失统计
+        total_roll_cls_loss = 0.0
+        total_pitch_cls_loss = 0.0
+        total_yaw_cls_loss = 0.0
+        total_roll_delta_loss = 0.0
+        total_pitch_delta_loss = 0.0
+        total_yaw_delta_loss = 0.0
+        
         num_batches = 0
         
         start_time = time.time()
@@ -1117,6 +1172,15 @@ class AdvancedTrainer:
             total_mean_iou += loss_dict['mean_iou'].item()
             total_adaptive_cls_weight += loss_dict.get('adaptive_classification_weight', torch.tensor(0.0)).item()
             total_adaptive_delta_weight += loss_dict.get('adaptive_delta_weight', torch.tensor(0.0)).item()
+            
+            # 🔍 添加旋转角度损失的单独统计
+            total_roll_cls_loss += loss_dict.get('roll_cls', torch.tensor(0.0)).item()
+            total_pitch_cls_loss += loss_dict.get('pitch_cls', torch.tensor(0.0)).item()
+            total_yaw_cls_loss += loss_dict.get('yaw_cls', torch.tensor(0.0)).item()
+            total_roll_delta_loss += loss_dict.get('roll_delta', torch.tensor(0.0)).item()
+            total_pitch_delta_loss += loss_dict.get('pitch_delta', torch.tensor(0.0)).item()
+            total_yaw_delta_loss += loss_dict.get('yaw_delta', torch.tensor(0.0)).item()
+            
             num_batches += 1
             
                     # 日志记录 - 只在主进程打印详细日志
@@ -1149,6 +1213,13 @@ class AdvancedTrainer:
             train_eos_loss=total_eos_loss / num_batches,
             train_mean_iou=total_mean_iou / num_batches,
             val_loss=0.0,  # 稍后填充
+            # 🔍 添加旋转角度损失统计
+            train_roll_cls_loss=total_roll_cls_loss / num_batches,
+            train_pitch_cls_loss=total_pitch_cls_loss / num_batches,
+            train_yaw_cls_loss=total_yaw_cls_loss / num_batches,
+            train_roll_delta_loss=total_roll_delta_loss / num_batches,
+            train_pitch_delta_loss=total_pitch_delta_loss / num_batches,
+            train_yaw_delta_loss=total_yaw_delta_loss / num_batches,
             val_generation_loss=0.0,
             val_mean_iou=0.0,
             val_generation_iou=0.0,
@@ -1187,6 +1258,9 @@ class AdvancedTrainer:
         total_w_error = 0.0
         total_h_error = 0.0
         total_l_error = 0.0
+        total_roll_error = 0.0
+        total_pitch_error = 0.0
+        total_yaw_error = 0.0
         total_overall_error = 0.0
         
         # 保存验证样本的推理结果
@@ -1259,7 +1333,7 @@ class AdvancedTrainer:
                 # print(f"gen_results: {gen_results}")
                 
                 # 计算生成结果的详细损失和统计信息
-                gen_metrics = self._compute_generation_metrics(gen_results, targets, loss_fn, verbose=False)
+                gen_metrics = self._compute_generation_metrics(gen_results, targets, loss_fn, verbose=False, equivalent_boxes=batch.get('equivalent_boxes'))
                 
                 # 删除这行重复的累积
                 # total_tf_loss += tf_loss_dict['total_loss'].item()
@@ -1270,13 +1344,16 @@ class AdvancedTrainer:
                 total_gt_boxes += gen_metrics['num_gt_boxes']
                 
                 # 累积维度误差
-                total_x_error += gen_metrics['x_error']
-                total_y_error += gen_metrics['y_error']
-                total_z_error += gen_metrics['z_error']
-                total_w_error += gen_metrics['w_error']
-                total_h_error += gen_metrics['h_error']
-                total_l_error += gen_metrics['l_error']
-                total_overall_error += gen_metrics['overall_mean_error']
+                total_x_error += gen_metrics.get('x_error', 0.0)
+                total_y_error += gen_metrics.get('y_error', 0.0)
+                total_z_error += gen_metrics.get('z_error', 0.0)
+                total_w_error += gen_metrics.get('w_error', 0.0)
+                total_h_error += gen_metrics.get('h_error', 0.0)
+                total_l_error += gen_metrics.get('l_error', 0.0)
+                total_roll_error += gen_metrics.get('roll_error', 0.0)
+                total_pitch_error += gen_metrics.get('pitch_error', 0.0)
+                total_yaw_error += gen_metrics.get('yaw_error', 0.0)
+                total_overall_error += gen_metrics.get('overall_mean_error', 0.0)
                 
                 num_batches += 1
                 
@@ -1339,6 +1416,9 @@ class AdvancedTrainer:
         avg_w_error = total_w_error / num_batches if num_batches > 0 else 0.0
         avg_h_error = total_h_error / num_batches if num_batches > 0 else 0.0
         avg_l_error = total_l_error / num_batches if num_batches > 0 else 0.0
+        avg_roll_error = total_roll_error / num_batches if num_batches > 0 else 0.0
+        avg_pitch_error = total_pitch_error / num_batches if num_batches > 0 else 0.0
+        avg_yaw_error = total_yaw_error / num_batches if num_batches > 0 else 0.0
         avg_overall_error = total_overall_error / num_batches if num_batches > 0 else 0.0
         
         # 返回结果 - 移除虚假的损失值
@@ -1358,6 +1438,9 @@ class AdvancedTrainer:
             'avg_w_error': avg_w_error,
             'avg_h_error': avg_h_error,
             'avg_l_error': avg_l_error,
+            'avg_roll_error': avg_roll_error,
+            'avg_pitch_error': avg_pitch_error,
+            'avg_yaw_error': avg_yaw_error,
             'avg_overall_error': avg_overall_error
         }
     
@@ -1391,6 +1474,7 @@ class AdvancedTrainer:
                                 delta = outputs['delta_dict'][attr + '_delta'][b, s]     # scalar
                                 continuous_val = self._get_continuous_prediction(logits, delta, attr)
                                 pred_box.append(continuous_val)
+                                
                         
                         # 旋转预测
                         for attr in ['roll', 'pitch', 'yaw']:
@@ -1434,27 +1518,29 @@ class AdvancedTrainer:
                     # 计算每个预测box与对应GT box的IoU
                     for i, (pred_box, pred_rot, gt_box, gt_rot) in enumerate(zip(pred_boxes, pred_rotations, gt_boxes, gt_rotations)):
                         try:
+                            # 检查box尺寸
+                            pred_size = np.array(pred_box[3:])  # [l, w, h]
+                            gt_size = np.array(gt_box[3:])     # [l, w, h]
+                            
+                            if np.any(pred_size <= 0) or np.any(gt_size <= 0):
+                                continue
+                            
                             # 使用OBB IoU计算
                             iou = self._compute_box_iou(pred_box, gt_box, pred_rot, gt_rot)
                             sample_ious.append(iou)
                             
                         except Exception as e:
-                            print(f"⚠️  计算box IoU时出错: {e}")
                             sample_ious.append(0.0)
                     
                     if sample_ious:
                         sample_mean_iou = sum(sample_ious) / len(sample_ious)
                         total_iou += sample_mean_iou
                         valid_samples += 1
-                        if verbose:  # 只在verbose=True时打印
-                            print(f"📊 TF Sample {b}: Mean IoU = {sample_mean_iou:.4f} ({len(sample_ious)} boxes)")
             
             if valid_samples == 0:
                 return 0.0
             
             mean_iou = total_iou / valid_samples
-            if verbose:  # 只在verbose=True时打印
-                print(f"\n🎯 TF Overall Mean IoU: {mean_iou:.4f} (from {valid_samples} samples)")
             return float(mean_iou)
             
         except Exception as e:
@@ -1508,7 +1594,7 @@ class AdvancedTrainer:
         
         return continuous_base + delta_val
 
-    def _compute_generation_metrics(self, gen_results: Dict, targets: Dict, loss_fn, verbose: bool = False) -> Dict[str, float]:
+    def _compute_generation_metrics(self, gen_results: Dict, targets: Dict, loss_fn, verbose: bool = False, equivalent_boxes: List = None) -> Dict[str, float]:
         """
         计算生成结果的详细指标
         Args:
@@ -1524,7 +1610,7 @@ class AdvancedTrainer:
             processed_gen_results = {}
             target_seq_len = targets['x'].shape[1]  # GT的序列长度
             
-            for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+            for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
                 if attr in gen_results:
                     # 获取生成结果（已经是连续值）
                     gen_values = gen_results[attr]  # [B, seq_len]
@@ -1539,21 +1625,113 @@ class AdvancedTrainer:
                     processed_gen_results[attr] = gen_values
                 else:
                     # 如果某个属性缺失，跳过该属性，不进行IoU计算
-                    print(f"⚠️  生成结果中缺少属性 {attr}，跳过该属性的IoU计算")
+                    # print(f"⚠️  生成结果中缺少属性 {attr}，跳过该属性的IoU计算")
                     continue
             
             # 计算IoU
-            gen_iou = self._compute_generation_iou(processed_gen_results, targets, verbose)
+            gen_iou = self._compute_generation_iou(processed_gen_results, targets, verbose, equivalent_boxes)
             
             # 计算9个维度的平均误差（包括旋转角度）
             dimension_errors = {}
             total_valid_predictions = 0
             
+            # 🔧 新增：如果有等效box信息，先选择最优等效box
+            if equivalent_boxes is not None:
+                # 为每个batch和sequence位置选择最优等效box
+                batch_size = targets['x'].shape[0]
+                seq_len = targets['x'].shape[1]
+                
+                # 创建最优等效box的目标值
+                optimal_targets = {}
+                for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
+                    optimal_targets[attr] = targets[attr].clone()
+                
+                for b in range(batch_size):
+                    for s in range(seq_len):
+                        # 检查是否为有效位置
+                        if targets['x'][b, s].item() != -1.0:
+                            # 🔧 检查生成结果序列长度是否足够（增量生成可能提前停止）
+                            gen_seq_len = processed_gen_results['x'].shape[1]
+                            if s >= gen_seq_len:
+                                # 增量生成提前停止，跳过该位置（这是正常行为）
+                                continue
+                            
+                            # 🔧 检查等效box是否存在且索引不越界
+                            if b < len(equivalent_boxes) and s < len(equivalent_boxes[b]) and len(equivalent_boxes[b][s]) > 0:
+                                # 构建预测box
+                                pred_box = [
+                                    processed_gen_results['x'][b, s].item(),
+                                    processed_gen_results['y'][b, s].item(),
+                                    processed_gen_results['z'][b, s].item(),
+                                    processed_gen_results['l'][b, s].item(),
+                                    processed_gen_results['w'][b, s].item(),
+                                    processed_gen_results['h'][b, s].item(),
+                                    processed_gen_results['roll'][b, s].item(),
+                                    processed_gen_results['pitch'][b, s].item(),
+                                    processed_gen_results['yaw'][b, s].item(),
+                                ]
+                                
+                                # 选择最优等效box
+                                equiv_boxes = equivalent_boxes[b][s]
+                                best_box, min_loss = select_best_equivalent_representation(pred_box, equiv_boxes)
+                            else:
+                                # 如果等效box不存在或索引越界，跳过该位置
+                                if b >= len(equivalent_boxes):
+                                    # print(f"⚠️  等效box batch索引越界: batch={b}, equiv_boxes_len={len(equivalent_boxes)}")
+                                    pass
+                                elif s >= len(equivalent_boxes[b]):
+                                    # print(f"⚠️  等效box序列索引越界: batch={b}, seq={s}, equiv_boxes_len={len(equivalent_boxes[b])}")
+                                    pass
+                                continue
+                            
+                            # 🔍 添加详细log：打印旋转误差计算过程（已注释）
+                            # print(f"🔍 旋转误差计算 - Batch {b}, Box {s}:")
+                            # print(f"   预测box: pos=({pred_box[0]:.3f}, {pred_box[1]:.3f}, {pred_box[2]:.3f}), "
+                            #       f"size=({pred_box[3]:.3f}, {pred_box[4]:.3f}, {pred_box[5]:.3f}), "
+                            #       f"rot=({pred_box[6]:.3f}, {pred_box[7]:.3f}, {pred_box[8]:.3f})")
+                            # print(f"   预测角度(度): roll={math.degrees(pred_box[6]):.1f}°, "
+                            #       f"pitch={math.degrees(pred_box[7]):.1f}°, "
+                            #       f"yaw={math.degrees(pred_box[8]):.1f}°")
+                            
+                            # print(f"   GT等效box数量: {len(equiv_boxes)}")
+                            # for i, equiv_box in enumerate(equiv_boxes):
+                            #     print(f"     等效box {i+1}: pos=({equiv_box[0]:.3f}, {equiv_box[1]:.3f}, {equiv_box[2]:.3f}), "
+                            #           f"size=({equiv_box[3]:.3f}, {equiv_box[4]:.3f}, {equiv_box[5]:.3f}), "
+                            #           f"rot=({equiv_box[6]:.3f}, {equiv_box[7]:.3f}, {equiv_box[8]:.3f})")
+                            #     print(f"     等效box {i+1}角度(度): roll={math.degrees(equiv_box[6]):.1f}°, "
+                            #           f"pitch={math.degrees(equiv_box[7]):.1f}°, "
+                            #           f"yaw={math.degrees(equiv_box[8]):.1f}°")
+                            
+                            # print(f"   选择的最优等效box: pos=({best_box[0]:.3f}, {best_box[1]:.3f}, {best_box[2]:.3f}), "
+                            #       f"size=({best_box[3]:.3f}, {best_box[4]:.3f}, {best_box[5]:.3f}), "
+                            #       f"rot=({best_box[6]:.3f}, {best_box[7]:.3f}, {best_box[8]:.3f})")
+                            # print(f"   最优等效box角度(度): roll={math.degrees(best_box[6]):.1f}°, "
+                            #       f"pitch={math.degrees(best_box[7]):.1f}°, "
+                            #       f"yaw={math.degrees(best_box[8]):.1f}°")
+                            # print(f"   最小旋转loss: {min_loss:.6f}")
+                            
+                            # 更新目标值
+                            optimal_targets['x'][b, s] = best_box[0]
+                            optimal_targets['y'][b, s] = best_box[1]
+                            optimal_targets['z'][b, s] = best_box[2]
+                            optimal_targets['l'][b, s] = best_box[3]
+                            optimal_targets['w'][b, s] = best_box[4]
+                            optimal_targets['h'][b, s] = best_box[5]
+                            optimal_targets['roll'][b, s] = best_box[6]
+                            optimal_targets['pitch'][b, s] = best_box[7]
+                            optimal_targets['yaw'][b, s] = best_box[8]
+                
+                # 使用最优等效box作为目标值
+                targets_to_use = optimal_targets
+            else:
+                # 没有等效box信息，使用原始目标值
+                targets_to_use = targets
+            
             for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
-                if attr in processed_gen_results and attr in targets:
+                if attr in processed_gen_results and attr in targets_to_use:
                     # 获取生成结果和目标值
                     gen_values = processed_gen_results[attr]  # [B, seq_len]
-                    gt_values = targets[attr]                  # [B, seq_len]
+                    gt_values = targets_to_use[attr]         # [B, seq_len]
                     
                     # 创建有效mask（排除padding值）
                     valid_mask = (gt_values != -1.0) & (gt_values != 0.0)  # GT非padding且非零
@@ -1566,17 +1744,43 @@ class AdvancedTrainer:
                         gt_values_aligned = gt_values[:, :min_len]
                         valid_mask_aligned = valid_mask[:, :min_len]
                         
-                        abs_errors = torch.abs(gen_values_aligned - gt_values_aligned)
+                        # 🔧 修复：对于旋转角度，使用周期性误差计算
+                        if attr in ['roll', 'pitch', 'yaw']:
+                            # 计算角度差值并归一化到[-π, π]
+                            angle_diff = gen_values_aligned - gt_values_aligned
+                            angle_diff = torch.atan2(torch.sin(angle_diff), torch.cos(angle_diff))
+                            abs_errors = torch.abs(angle_diff)
+                        else:
+                            # 对于位置和尺寸，使用普通绝对误差
+                            abs_errors = torch.abs(gen_values_aligned - gt_values_aligned)
+                        
                         valid_errors = abs_errors[valid_mask_aligned]
                         
                         # 计算平均误差
                         mean_error = valid_errors.mean().item() if len(valid_errors) > 0 else 0.0
-                        dimension_errors[f'{attr}_error'] = mean_error
+                        
+                        # 🔧 修复：对于旋转角度，将弧度转换为角度制记录到SwanLab
+                        if attr in ['roll', 'pitch', 'yaw']:
+                            dimension_errors[f'{attr}_error'] = mean_error * 180.0 / math.pi  # 弧度转角度
+                        else:
+                            dimension_errors[f'{attr}_error'] = mean_error
                         total_valid_predictions += valid_mask_aligned.sum().item()
+                        
+                        # 🔍 添加调试日志：打印旋转角度的误差信息
+                        # if attr in ['roll', 'pitch', 'yaw'] and verbose:
+                        #     print(f"🔍 {attr}角度误差计算:")
+                        #     print(f"   有效预测数量: {valid_mask_aligned.sum().item()}")
+                        #     print(f"   平均误差: {mean_error:.6f}")
+                        #     print(f"   生成值范围: [{gen_values_aligned.min().item():.6f}, {gen_values_aligned.max().item():.6f}]")
+                        #     print(f"   GT值范围: [{gt_values_aligned.min().item():.6f}, {gt_values_aligned.max().item():.6f}]")
                     else:
                         dimension_errors[f'{attr}_error'] = 0.0
+                        # if attr in ['roll', 'pitch', 'yaw'] and verbose:
+                        #     print(f"⚠️  {attr}角度没有有效预测（全为padding）")
                 else:
                     dimension_errors[f'{attr}_error'] = 0.0
+                    # if attr in ['roll', 'pitch', 'yaw'] and verbose:
+                    #     print(f"⚠️  {attr}角度缺失在生成结果或目标中")
             
             # 计算总体平均误差
             if total_valid_predictions > 0:
@@ -1610,7 +1814,10 @@ class AdvancedTrainer:
                 'z_error': dimension_errors['z_error'],
                 'w_error': dimension_errors['w_error'],
                 'h_error': dimension_errors['h_error'],
-                'l_error': dimension_errors['l_error']
+                'l_error': dimension_errors['l_error'],
+                'roll_error': dimension_errors['roll_error'],
+                'pitch_error': dimension_errors['pitch_error'],
+                'yaw_error': dimension_errors['yaw_error']
             }
             
             return metrics
@@ -1628,10 +1835,13 @@ class AdvancedTrainer:
                 'z_error': 1.0,
                 'w_error': 1.0,
                 'h_error': 1.0,
-                'l_error': 1.0
+                'l_error': 1.0,
+                'roll_error': 1.0,
+                'pitch_error': 1.0,
+                'yaw_error': 1.0
             }
     
-    def _compute_generation_iou(self, gen_results: Dict, targets: Dict, verbose: bool = False) -> float:
+    def _compute_generation_iou(self, gen_results: Dict, targets: Dict, verbose: bool = False, equivalent_boxes: List = None) -> float:
         """计算生成结果与目标的IoU，使用一对一匹配策略"""
         try:
             # 检查生成结果
@@ -1657,6 +1867,27 @@ class AdvancedTrainer:
                 for s in range(seq_len):
                     # 检查GT是否为有效位置（非padding）且生成结果中也存在该位置
                     if targets['x'][b, s].item() != -1.0 and s < gen_len:
+                        # 对应的预测box - 修复访问格式
+                        pred_box = [
+                            float(gen_results['x'][b, s]),
+                            float(gen_results['y'][b, s]),
+                            float(gen_results['z'][b, s]),
+                            float(gen_results['l'][b, s]),
+                            float(gen_results['w'][b, s]),
+                            float(gen_results['h'][b, s]),
+                        ]
+                        
+                        # 🔧 修复：检查预测box是否为padding
+                        pred_pos = np.array(pred_box[:3])  # [x, y, z]
+                        pred_size = np.array(pred_box[3:])  # [l, w, h]
+                        
+                        # 检查是否为padding值（-1.0）或全零
+                        is_padding_value = np.allclose(pred_pos, -1.0, atol=1e-6) or np.allclose(pred_pos, 0.0, atol=1e-6)
+                        is_zero_size = np.allclose(pred_size, 0.0, atol=1e-6) or np.allclose(pred_size, -1.0, atol=1e-6)
+                        
+                        if is_padding_value or is_zero_size:
+                            continue
+                        
                         # GT box
                         gt_box = [
                             targets['x'][b, s].cpu().item(),
@@ -1667,6 +1898,7 @@ class AdvancedTrainer:
                             targets['h'][b, s].cpu().item(),
                         ]
                         gt_boxes.append(gt_box)
+                        pred_boxes.append(pred_box)
                         
                         # GT旋转信息
                         if 'roll' in targets and 'pitch' in targets and 'yaw' in targets:
@@ -1679,17 +1911,6 @@ class AdvancedTrainer:
                         else:
                             gt_rotations.append([0.0, 0.0, 0.0])  # 零旋转
                         
-                        # 对应的预测box - 修复访问格式
-                        pred_box = [
-                            float(gen_results['x'][b, s]),
-                            float(gen_results['y'][b, s]),
-                            float(gen_results['z'][b, s]),
-                            float(gen_results['l'][b, s]),
-                            float(gen_results['w'][b, s]),
-                            float(gen_results['h'][b, s]),
-                        ]
-                        pred_boxes.append(pred_box)
-                        
                         # 预测旋转信息
                         if 'roll' in gen_results and 'pitch' in gen_results and 'yaw' in gen_results:
                             pred_rot = [
@@ -1701,6 +1922,13 @@ class AdvancedTrainer:
                         else:
                             pred_rotations.append([0.0, 0.0, 0.0])  # 零旋转
                 
+                # 🔍 添加调试信息：检查生成结果长度
+                # print(f"🔍 生成IoU调试 - Batch {b}:")
+                # print(f"   目标序列长度: {seq_len}")
+                # print(f"   生成序列长度: {gen_len}")
+                # print(f"   预测box数量: {len(pred_boxes)}")
+                # print(f"   GT box数量: {len(gt_boxes)}")
+                
                 # 计算该样本的IoU（一对一匹配）
                 if pred_boxes and gt_boxes:
                     sample_ious = []
@@ -1708,32 +1936,142 @@ class AdvancedTrainer:
                     # 计算每个预测box与对应GT box的IoU
                     for i, (pred_box, pred_rot, gt_box, gt_rot) in enumerate(zip(pred_boxes, pred_rotations, gt_boxes, gt_rotations)):
                         try:
+                            # 🔍 添加详细日志：检查box尺寸
+                            pred_size = np.array(pred_box[3:])  # [l, w, h]
+                            gt_size = np.array(gt_box[3:])     # [l, w, h]
+                            
+                            if np.any(pred_size <= 0) or np.any(gt_size <= 0):
+                                # print(f"🚨 检测到尺寸为0的box - Batch {b}, Box {i}:")
+                                # print(f"   预测box: pos={pred_box[:3]}, size={pred_size} (l={pred_size[0]:.6f}, w={pred_size[1]:.6f}, h={pred_size[2]:.6f})")
+                                # print(f"   GT box:   pos={gt_box[:3]}, size={gt_size} (l={gt_size[0]:.6f}, w={gt_size[1]:.6f}, h={gt_size[2]:.6f})")
+                                # print(f"   预测旋转: {pred_rot}")
+                                # print(f"   GT旋转:   {gt_rot}")
+                                pass
+                            
                             # 使用OBB IoU计算
                             iou = self._compute_box_iou(pred_box, gt_box, pred_rot, gt_rot)
                             sample_ious.append(iou)
                             
+                            # 🔍 详细调试信息：打印每个box的详细信息
+                            # print(f"   Box {i}:")
+                            # print(f"     预测box: pos=({pred_box[0]:.3f}, {pred_box[1]:.3f}, {pred_box[2]:.3f}), size=({pred_box[3]:.3f}, {pred_box[4]:.3f}, {pred_box[5]:.3f})")
+                            # print(f"     GT box:   pos=({gt_box[0]:.3f}, {gt_box[1]:.3f}, {gt_box[2]:.3f}), size=({gt_box[3]:.3f}, {gt_box[4]:.3f}, {gt_box[5]:.3f})")
+                            # print(f"     预测旋转: roll={pred_rot[0]:.3f}, pitch={pred_rot[1]:.3f}, yaw={pred_rot[2]:.3f}")
+                            # print(f"     GT旋转:   roll={gt_rot[0]:.3f}, pitch={gt_rot[1]:.3f}, yaw={gt_rot[2]:.3f}")
+                            
+                            # 🔍 如果有等效box信息，显示最优等效box
+                            if equivalent_boxes is not None and b < len(equivalent_boxes) and i < len(equivalent_boxes[b]):
+                                try:
+                                    # 构建预测box用于等效box选择
+                                    pred_box_for_equiv = [
+                                        pred_box[0], pred_box[1], pred_box[2],  # pos
+                                        pred_box[3], pred_box[4], pred_box[5],  # size
+                                        pred_rot[0], pred_rot[1], pred_rot[2]   # rot
+                                    ]
+                                    
+                                    # 选择最优等效box
+                                    equiv_boxes = equivalent_boxes[b][i]
+                                    if len(equiv_boxes) > 0:
+                                        best_box, min_loss = select_best_equivalent_representation(pred_box_for_equiv, equiv_boxes)
+                                        
+                                        # 🔍 调试：检查best_box的结构
+                                        # print(f"     🔍 best_box结构调试:")
+                                        # print(f"       best_box类型: {type(best_box)}")
+                                        # print(f"       best_box长度: {len(best_box)}")
+                                        # print(f"       best_box内容: {best_box}")
+                                        
+                                        # print(f"     最优等效box: pos=({best_box[0]:.3f}, {best_box[1]:.3f}, {best_box[2]:.3f}), size=({best_box[3]:.3f}, {best_box[4]:.3f}, {best_box[5]:.3f})")
+                                        # print(f"     最优等效旋转: roll={best_box[6]:.3f}, pitch={best_box[7]:.3f}, yaw={best_box[8]:.3f}")
+                                        # print(f"     原始等效box数量: {len(equiv_boxes)}, 筛选后等效box数量: {len([eq for eq in equiv_boxes if abs(eq[6]) <= math.pi/3 and abs(eq[7]) <= math.pi/3 and abs(eq[8]) <= math.pi/3])}, 最小loss: {min_loss:.6f}")
+                                        
+                                        # 🔍 调试：检查pred_box和best_box的结构
+                                        # print(f"     🔍 误差计算调试:")
+                                        # print(f"       pred_box类型: {type(pred_box)}, 长度: {len(pred_box)}")
+                                        # print(f"       pred_box内容: {pred_box}")
+                                        # print(f"       best_box类型: {type(best_box)}, 长度: {len(best_box)}")
+                                        # print(f"       best_box内容: {best_box}")
+                                        
+                                        # 🔧 修复：pred_box只有6个元素，需要正确切片
+                                        pred_pos_array = np.array(pred_box[:3])
+                                        best_pos_array = np.array(best_box[:3])
+                                        # print(f"       pred_pos_array形状: {pred_pos_array.shape}")
+                                        # print(f"       best_pos_array形状: {best_pos_array.shape}")
+                                        
+                                        equiv_pos_error = np.sqrt(sum((pred_pos_array - best_pos_array)**2))
+                                        
+                                        # pred_box只有6个元素，best_box有9个元素
+                                        pred_size_array = np.array(pred_box[3:])  # [l, w, h]
+                                        best_size_array = np.array(best_box[3:6])  # [l, w, h] - 只取尺寸部分
+                                        # print(f"       pred_size_array形状: {pred_size_array.shape}")
+                                        # print(f"       best_size_array形状: {best_size_array.shape}")
+                                        
+                                        equiv_size_error = np.sqrt(sum((pred_size_array - best_size_array)**2))
+                                        
+                                        # 🔍 调试：检查旋转部分的形状
+                                        # print(f"     🔍 旋转部分调试:")
+                                        # print(f"       pred_rot类型: {type(pred_rot)}, 长度: {len(pred_rot)}")
+                                        # print(f"       pred_rot内容: {pred_rot}")
+                                        best_box_rot_slice = best_box[6:9]
+                                        # print(f"       best_box[6:9]类型: {type(best_box_rot_slice)}, 长度: {len(best_box_rot_slice)}")
+                                        # print(f"       best_box[6:9]内容: {best_box_rot_slice}")
+                                        
+                                        # 🔧 修复：确保旋转部分是正确的格式
+                                        pred_rot_array = np.array(pred_rot)
+                                        best_rot_array = np.array([best_box[6], best_box[7], best_box[8]])
+                                        
+                                        # print(f"       pred_rot_array形状: {pred_rot_array.shape}")
+                                        # print(f"       best_rot_array形状: {best_rot_array.shape}")
+                                        
+                                        equiv_rot_error = np.sqrt(sum((pred_rot_array - best_rot_array)**2))
+                                        
+                                        # print(f"     与最优等效box误差: pos={equiv_pos_error:.3f}, size={equiv_size_error:.3f}, rot={equiv_rot_error:.3f}")
+                                except Exception as e:
+                                    import traceback
+                                    # print(f"     ⚠️ 等效box调试出错: {e}")
+                                    # print(f"     详细错误信息:")
+                                    # traceback.print_exc()
+                                    pass
+                            
+                            # 计算各维度误差
+                            pos_error = np.sqrt(sum((np.array(pred_box[:3]) - np.array(gt_box[:3]))**2))
+                            size_error = np.sqrt(sum((np.array(pred_box[3:]) - np.array(gt_box[3:]))**2))
+                            rot_error = np.sqrt(sum((np.array(pred_rot) - np.array(gt_rot))**2))
+                            
+                            # print(f"     位置误差: {pos_error:.3f}")
+                            # print(f"     尺寸误差: {size_error:.3f}")
+                            # print(f"     旋转误差: {rot_error:.3f}")
+                            # print(f"     IoU: {iou:.4f}")
+                            
+                            # 如果IoU异常高，额外检查
+                            # if iou > 0.5:
+                            #     print(f"     🚨 异常高IoU警告!")
+                            #     print(f"       尺寸差异: l={abs(pred_box[3]-gt_box[3]):.3f}, w={abs(pred_box[4]-gt_box[4]):.3f}, h={abs(pred_box[5]-gt_box[5]):.3f}")
+                            #     print(f"       位置差异: x={abs(pred_box[0]-gt_box[0]):.3f}, y={abs(pred_box[1]-gt_box[1]):.3f}, z={abs(pred_box[2]-gt_box[2]):.3f}")
+                            
                         except Exception as e:
-                            print(f"⚠️  计算box IoU时出错: {e}")
+                            # print(f"⚠️  计算box IoU时出错: {e}")
                             sample_ious.append(0.0)
                     
                     if sample_ious:
                         sample_mean_iou = sum(sample_ious) / len(sample_ious)
                         total_iou += sample_mean_iou
                         valid_samples += 1
-                        if verbose:  # 只在verbose=True时打印每个sample的IoU
-                            print(f"📊 Generation Sample {b}: Mean IoU = {sample_mean_iou:.4f} ({len(sample_ious)} boxes)")
+                        # print(f"   样本 {b} 平均IoU: {sample_mean_iou:.4f} (有效IoU数量: {len(sample_ious)})")
+                    else:
+                        # print(f"   样本 {b} 没有有效的IoU计算")
+                        pass
             
             if valid_samples == 0:
                 return 0.0
             
             mean_iou = total_iou / valid_samples
-            if verbose:  # 只在verbose=True时打印总体IoU
-                print(f"\n🎯 Generation Overall Mean IoU: {mean_iou:.4f} (from {valid_samples} samples)")
+            # print(f"\n🎯 生成Overall Mean IoU: {mean_iou:.4f} (from {valid_samples} samples)")
             return float(mean_iou)
             
         except Exception as e:
             if verbose:
-                print(f"计算生成IoU时出错: {e}")
+                # print(f"计算生成IoU时出错: {e}")
+                pass
             return 0.0
     
     def _compute_box_iou(self, box1: List[float], box2: List[float], rot1: List[float] = None, rot2: List[float] = None) -> float:
@@ -1772,21 +2110,21 @@ class AdvancedTrainer:
             
             # 确保输入格式正确
             if len(box1) != 6 or len(box2) != 6 or len(rot1) != 3 or len(rot2) != 3:
-                print(f"⚠️  OBB输入格式错误: box1={len(box1)}, box2={len(box2)}, rot1={len(rot1)}, rot2={len(rot2)}")
+                # print(f"⚠️  OBB输入格式错误: box1={len(box1)}, box2={len(box2)}, rot1={len(rot1)}, rot2={len(rot2)}")
                 return 0.0
             
             # 检查输入参数的有效性
             if np.any(np.isnan(box1)) or np.any(np.isinf(box1)):
-                print(f"⚠️  Box1包含无效值: box1={box1}")
+                # print(f"⚠️  Box1包含无效值: box1={box1}")
                 return 0.0
             if np.any(np.isnan(box2)) or np.any(np.isinf(box2)):
-                print(f"⚠️  Box2包含无效值: box2={box2}")
+                # print(f"⚠️  Box2包含无效值: box2={box2}")
                 return 0.0
             if np.any(np.isnan(rot1)) or np.any(np.isinf(rot1)):
-                print(f"⚠️  Rot1包含无效值: rot1={rot1}")
+                # print(f"⚠️  Rot1包含无效值: rot1={rot1}")
                 return 0.0
             if np.any(np.isnan(rot2)) or np.any(np.isinf(rot2)):
-                print(f"⚠️  Rot2包含无效值: rot2={rot2}")
+                # print(f"⚠️  Rot2包含无效值: rot2={rot2}")
                 return 0.0
             
             # 提取box参数
@@ -1797,10 +2135,12 @@ class AdvancedTrainer:
             
             # 检查尺寸是否有效（避免尺寸为0的box）
             if np.any(size1 <= 0) or np.any(size2 <= 0):
-                print(f"⚠️  检测到无效尺寸的box:")
-                print(f"  Box1尺寸: {size1} (l={size1[0]:.6f}, w={size1[1]:.6f}, h={size1[2]:.6f})")
-                print(f"  Box2尺寸: {size2} (l={size2[0]:.6f}, w={size2[1]:.6f}, h={size2[2]:.6f})")
-                print(f"  返回IoU=0.0")
+                # print(f"🚨 在OBB IoU计算中检测到无效尺寸的box:")
+                # print(f"  Box1: center={center1}, size={size1} (l={size1[0]:.6f}, w={size1[1]:.6f}, h={size1[2]:.6f})")
+                # print(f"  Box2: center={center2}, size={size2} (l={size2[0]:.6f}, w={size2[1]:.6f}, h={size2[2]:.6f})")
+                # print(f"  Rot1: {rot1}")
+                # print(f"  Rot2: {rot2}")
+                # print(f"  返回IoU=0.0")
                 return 0.0
             
             # 创建旋转矩阵
@@ -1836,21 +2176,21 @@ class AdvancedTrainer:
             try:
                 # 验证顶点数据的有效性
                 if not self._validate_vertices(vertices1):
-                    print(f"⚠️  Box1顶点数据无效:")
-                    print(f"  center1: {center1}")
-                    print(f"  size1: {size1}")
-                    print(f"  rot1: {rot1}")
-                    print(f"  vertices1 shape: {vertices1.shape}")
-                    print(f"  vertices1 sample: {vertices1[:3]}")
+                    # print(f"⚠️  Box1顶点数据无效:")
+                    # print(f"  center1: {center1}")
+                    # print(f"  size1: {size1}")
+                    # print(f"  rot1: {rot1}")
+                    # print(f"  vertices1 shape: {vertices1.shape}")
+                    # print(f"  vertices1 sample: {vertices1[:3]}")
                     raise ValueError("Box1顶点数据无效，无法计算OBB IoU")
                 
                 if not self._validate_vertices(vertices2):
-                    print(f"⚠️  Box2顶点数据无效:")
-                    print(f"  center2: {center2}")
-                    print(f"  size2: {size2}")
-                    print(f"  rot2: {rot2}")
-                    print(f"  vertices2 shape: {vertices2.shape}")
-                    print(f"  vertices2 sample: {vertices2[:3]}")
+                    # print(f"⚠️  Box2顶点数据无效:")
+                    # print(f"  center2: {center2}")
+                    # print(f"  size2: {size2}")
+                    # print(f"  rot2: {rot2}")
+                    # print(f"  vertices2 shape: {vertices2.shape}")
+                    # print(f"  vertices2 sample: {vertices2[:3]}")
                     raise ValueError("Box2顶点数据无效，无法计算OBB IoU")
                 
                 hull1 = ConvexHull(vertices1)
@@ -1907,7 +2247,50 @@ class AdvancedTrainer:
     
     def _compute_obb_intersection_volume(self, vertices1: np.ndarray, vertices2: np.ndarray, volume1: float, volume2: float) -> float:
         """
-        计算两个OBB的交集体积（简化实现）
+        使用trimesh计算两个OBB的真实交集体积
+        使用manifold3d进行精确的布尔运算
+        """
+        try:
+            import trimesh
+            import numpy as np
+            
+            # 创建两个OBB的trimesh对象
+            try:
+                # 创建第一个OBB的mesh
+                mesh1 = trimesh.convex.convex_hull(vertices1)
+                # 创建第二个OBB的mesh  
+                mesh2 = trimesh.convex.convex_hull(vertices2)
+                
+                # 使用trimesh的布尔运算计算交集
+                intersection = mesh1.intersection(mesh2)
+                
+                if intersection is None or intersection.volume <= 0:
+                    return 0.0
+                
+                intersection_volume = intersection.volume
+                
+                # 计算IoU
+                union_volume = volume1 + volume2 - intersection_volume
+                if union_volume <= 0:
+                    return 0.0
+                
+                iou = intersection_volume / union_volume
+                return max(0.0, min(1.0, iou))
+                
+            except Exception as e:
+                print(f"⚠️  Trimesh布尔运算计算出错: {e}")
+                # 回退到AABB方法
+                return self._compute_aabb_iou(vertices1, vertices2, volume1, volume2)
+            
+        except Exception as e:
+            print(f"⚠️  OBB交集体积计算出错: {e}")
+            return 0.0
+    
+    
+    
+    def _compute_aabb_iou(self, vertices1: np.ndarray, vertices2: np.ndarray, volume1: float, volume2: float) -> float:
+        """
+        计算AABB IoU（备用方法）
         """
         try:
             import numpy as np
@@ -1938,7 +2321,7 @@ class AdvancedTrainer:
             return max(0.0, min(1.0, iou))
             
         except Exception as e:
-            print(f"⚠️  交集体积计算出错: {e}")
+            print(f"⚠️  AABB IoU计算出错: {e}")
             return 0.0
     
     
@@ -2067,11 +2450,11 @@ class AdvancedTrainer:
         
         # 调试信息：当IoU异常时打印详细信息
         if iou < 0 or iou > 1:
-            print(f"⚠️  异常IoU值: {iou:.6f}")
-            print(f"  intersection_count: {intersection_count}, dV: {dV:.6f}")
-            print(f"  vol1: {vol1:.6f}, vol2: {vol2:.6f}")
-            print(f"  intersection_volume: {intersection_volume:.6f}")
-            print(f"  union_volume: {union_volume:.6f}")
+            # print(f"⚠️  异常IoU值: {iou:.6f}")
+            # print(f"  intersection_count: {intersection_count}, dV: {dV:.6f}")
+            # print(f"  vol1: {vol1:.6f}, vol2: {vol2:.6f}")
+            # print(f"  intersection_volume: {intersection_volume:.6f}")
+            # print(f"  union_volume: {union_volume:.6f}")
             # 强制限制在[0,1]范围内
             iou = max(0.0, min(1.0, iou))
         
@@ -2217,6 +2600,14 @@ class AdvancedTrainer:
                 
                 # 计算每个样本的生成指标
                 batch_size = targets['x'].size(0)
+                batch_x_error = 0.0
+                batch_y_error = 0.0
+                batch_z_error = 0.0
+                batch_w_error = 0.0
+                batch_h_error = 0.0
+                batch_l_error = 0.0
+                batch_overall_error = 0.0
+                
                 for sample_idx in range(batch_size):
                     # 提取单个样本的结果
                     sample_gen_results = {}
@@ -2229,7 +2620,12 @@ class AdvancedTrainer:
                             sample_targets[attr] = targets[attr][sample_idx:sample_idx+1]  # [1, seq_len]
                     
                     # 计算单个样本的指标
-                    sample_metrics = self._compute_generation_metrics(sample_gen_results, sample_targets, None, verbose=False)
+                    # 🔧 修复：使用与验证集相同的等效box逻辑
+                    if batch.get('equivalent_boxes'):
+                        sample_equivalent_boxes = [batch['equivalent_boxes'][sample_idx]]
+                    else:
+                        sample_equivalent_boxes = None
+                    sample_metrics = self._compute_generation_metrics(sample_gen_results, sample_targets, None, verbose=False, equivalent_boxes=sample_equivalent_boxes)
                     
                     # 打印每个样本的结果
                     if self.is_main_process:
@@ -2240,20 +2636,24 @@ class AdvancedTrainer:
                     total_gen_iou += sample_metrics['iou']
                     total_generated_boxes += sample_metrics['num_generated_boxes']
                     total_gt_boxes += sample_metrics['num_gt_boxes']
+                    
+                    # 累积误差指标
+                    batch_x_error += sample_metrics.get('x_error', 0.0)
+                    batch_y_error += sample_metrics.get('y_error', 0.0)
+                    batch_z_error += sample_metrics.get('z_error', 0.0)
+                    batch_w_error += sample_metrics.get('w_error', 0.0)
+                    batch_h_error += sample_metrics.get('h_error', 0.0)
+                    batch_l_error += sample_metrics.get('l_error', 0.0)
+                    batch_overall_error += sample_metrics.get('overall_mean_error', 0.0)
                 
-                # 计算batch平均指标（用于后续统计）
-                gen_metrics = {
-                    'iou': total_gen_iou / batch_size if batch_size > 0 else 0.0,
-                    'num_generated_boxes': total_generated_boxes / batch_size if batch_size > 0 else 0.0,
-                    'num_gt_boxes': total_gt_boxes / batch_size if batch_size > 0 else 0.0
-                }
-                total_x_error += gen_metrics['x_error']
-                total_y_error += gen_metrics['y_error']
-                total_z_error += gen_metrics['z_error']
-                total_w_error += gen_metrics['w_error']
-                total_h_error += gen_metrics['h_error']
-                total_l_error += gen_metrics['l_error']
-                total_overall_error += gen_metrics['overall_mean_error']
+                # 累积到总误差 - 🔧 修复：直接累积，不要多除batch_size
+                total_x_error += batch_x_error
+                total_y_error += batch_y_error
+                total_z_error += batch_z_error
+                total_w_error += batch_w_error
+                total_h_error += batch_h_error
+                total_l_error += batch_l_error
+                total_overall_error += batch_overall_error
                 
                 # 保存详细结果
                 test_results.append({
@@ -2279,16 +2679,16 @@ class AdvancedTrainer:
                         'yaw': targets['yaw'].cpu().tolist(),
                     },
                     'metrics': {
-                        'iou': gen_metrics['iou'],
-                        'num_generated_boxes': gen_metrics['num_generated_boxes'],
-                        'num_gt_boxes': gen_metrics['num_gt_boxes'],
-                        'x_error': gen_metrics['x_error'],
-                        'y_error': gen_metrics['y_error'],
-                        'z_error': gen_metrics['z_error'],
-                        'w_error': gen_metrics['w_error'],
-                        'h_error': gen_metrics['h_error'],
-                        'l_error': gen_metrics['l_error'],
-                        'overall_mean_error': gen_metrics['overall_mean_error']
+                        'iou': total_gen_iou / batch_size if batch_size > 0 else 0.0,
+                        'num_generated_boxes': total_generated_boxes / batch_size if batch_size > 0 else 0.0,
+                        'num_gt_boxes': total_gt_boxes / batch_size if batch_size > 0 else 0.0,
+                        'x_error': batch_x_error / batch_size if batch_size > 0 else 0.0,
+                        'y_error': batch_y_error / batch_size if batch_size > 0 else 0.0,
+                        'z_error': batch_z_error / batch_size if batch_size > 0 else 0.0,
+                        'w_error': batch_w_error / batch_size if batch_size > 0 else 0.0,
+                        'h_error': batch_h_error / batch_size if batch_size > 0 else 0.0,
+                        'l_error': batch_l_error / batch_size if batch_size > 0 else 0.0,
+                        'overall_mean_error': batch_overall_error / batch_size if batch_size > 0 else 0.0
                     }
                 })
                 
@@ -2624,6 +3024,14 @@ class AdvancedTrainer:
                         'train/eos_loss': train_stats.train_eos_loss,
                         'train/mean_iou': train_stats.train_mean_iou,
                         
+                        # 🔍 添加旋转角度损失记录
+                        'train/roll_cls_loss': train_stats.train_roll_cls_loss,
+                        'train/pitch_cls_loss': train_stats.train_pitch_cls_loss,
+                        'train/yaw_cls_loss': train_stats.train_yaw_cls_loss,
+                        'train/roll_delta_loss': train_stats.train_roll_delta_loss,
+                        'train/pitch_delta_loss': train_stats.train_pitch_delta_loss,
+                        'train/yaw_delta_loss': train_stats.train_yaw_delta_loss,
+                        
                         # Teacher Forcing验证loss组件  
                         'val/tf_total_loss': val_results['tf_total_loss'],
                         'val/tf_classification_loss': val_results['tf_classification_loss'],
@@ -2678,6 +3086,7 @@ class AdvancedTrainer:
                     print(f"   总体平均误差: {val_results.get('avg_overall_error', 0.0):.4f}")
                     print(f"   X误差: {val_results.get('avg_x_error', 0.0):.4f} | Y误差: {val_results.get('avg_y_error', 0.0):.4f} | Z误差: {val_results.get('avg_z_error', 0.0):.4f}")
                     print(f"   W误差: {val_results.get('avg_w_error', 0.0):.4f} | H误差: {val_results.get('avg_h_error', 0.0):.4f} | L误差: {val_results.get('avg_l_error', 0.0):.4f}")
+                    print(f"   旋转误差: Roll={val_results.get('avg_roll_error', 0.0):.4f} | Pitch={val_results.get('avg_pitch_error', 0.0):.4f} | Yaw={val_results.get('avg_yaw_error', 0.0):.4f}")
                     print(f"📦 箱子统计:")
                     print(f"   平均生成数量: {val_results['avg_generated_boxes']:.1f} | 平均GT数量: {val_results['avg_gt_boxes']:.1f} | 生成率: {val_results['avg_generated_boxes']/max(val_results['avg_gt_boxes'], 1):.2f}")
                     print(f"⚖️  权重详情:")

@@ -35,9 +35,9 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
         continuous_range_w: Tuple[float, float] = (0.3, 0.7),
         continuous_range_h: Tuple[float, float] = (0.3, 0.7),
         continuous_range_l: Tuple[float, float] = (0.3, 0.7),
-        continuous_range_roll: Tuple[float, float] = (-1.5708, 1.5708),  # 新增旋转范围（弧度）
-        continuous_range_pitch: Tuple[float, float] = (-1.5708, 1.5708),
-        continuous_range_yaw: Tuple[float, float] = (-1.5708, 1.5708),
+        continuous_range_roll: Tuple[float, float] = (-3.14159, 3.14159),  # 新增旋转范围（弧度）[-π, π]
+        continuous_range_pitch: Tuple[float, float] = (-3.14159, 3.14159),
+        continuous_range_yaw: Tuple[float, float] = (-3.14159, 3.14159),
         
         # 基础损失权重
         base_classification_weight: float = 1.0,
@@ -698,6 +698,13 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
             # 🔧 修复：使用原始continuous_range计算target labels
             min_val, max_val = value_range
             
+            # 🔍 添加调试日志：打印旋转角度的分类损失计算信息
+            # if attr_name in ['roll', 'pitch', 'yaw']:
+            #     print(f"🔍 {attr_name}角度分类损失计算:")
+            #     print(f"   范围: [{min_val:.6f}, {max_val:.6f}]")
+            #     print(f"   目标值范围: [{targets.min().item():.6f}, {targets.max().item():.6f}]")
+            #     print(f"   Logits形状: {logits.shape}")
+            
             # 正确的序列对齐：
             # logits[0] 预测第1个box，logits[1] 预测第2个box，...，logits[14] 预测第15个box
             # 我们只使用前max_boxes个预测与targets对比
@@ -797,6 +804,13 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
             
             # 🔧 修复：使用原始continuous_range进行计算
             min_val, max_val = value_range
+            
+            # 🔍 添加调试日志：打印旋转角度的损失计算信息
+            # if attr_name in ['roll', 'pitch', 'yaw']:
+            #     print(f"🔍 {attr_name}角度delta损失计算:")
+            #     print(f"   范围: [{min_val:.6f}, {max_val:.6f}]")
+            #     print(f"   目标值范围: [{targets.min().item():.6f}, {targets.max().item():.6f}]")
+            #     print(f"   Delta预测范围: [{delta_pred.min().item():.6f}, {delta_pred.max().item():.6f}]")
             
             # 对delta_pred也只使用前max_boxes个预测与targets对齐  
             target_seq_len = targets.shape[1]

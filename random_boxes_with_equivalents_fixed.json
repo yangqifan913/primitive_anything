@@ -1,0 +1,1696 @@
+{
+  "metadata": {
+    "description": "10个随机生成的3D box及其等效box（修复后）",
+    "generation_time": "2024-01-01",
+    "total_boxes": 10,
+    "equivalent_box_count": 6,
+    "coordinate_system": "右手坐标系",
+    "angle_unit": "弧度 (radians)",
+    "angle_range": "[-π/2, π/2]",
+    "position_ranges": {
+      "x": [
+        0.5,
+        3.0
+      ],
+      "y": [
+        -2.5,
+        2.5
+      ],
+      "z": [
+        -1.5,
+        0.5
+      ]
+    },
+    "size_ranges": {
+      "length": [
+        0.3,
+        0.7
+      ],
+      "width": [
+        0.3,
+        0.7
+      ],
+      "height": [
+        0.3,
+        0.7
+      ]
+    },
+    "fixes": [
+      "修复了等效box生成中position被错误覆盖的bug",
+      "确保所有等效box的position与原始box完全一致",
+      "只有size排列和对应的rotation会改变"
+    ]
+  },
+  "boxes": [
+    {
+      "original_box": {
+        "id": 1,
+        "position": {
+          "x": 2.098567,
+          "y": -2.374946,
+          "z": -0.949941
+        },
+        "size": {
+          "length": 0.389284,
+          "width": 0.594588,
+          "height": 0.57068
+        },
+        "rotation": {
+          "roll": 1.232068,
+          "pitch": -1.29767,
+          "yaw": -0.24529
+        },
+        "rotation_degrees": {
+          "roll": 70.59,
+          "pitch": -74.35,
+          "yaw": -14.05
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 2.098567,
+            "y": -2.374946,
+            "z": -0.949941
+          },
+          "size": {
+            "length": 0.389284,
+            "width": 0.594588,
+            "height": 0.57068
+          },
+          "rotation": {
+            "roll": 1.232068,
+            "pitch": -1.29767,
+            "yaw": -0.24529
+          },
+          "rotation_degrees": {
+            "roll": 70.59,
+            "pitch": -74.35,
+            "yaw": -14.05
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 2.098567,
+            "y": -2.374946,
+            "z": -0.949941
+          },
+          "size": {
+            "length": 0.389284,
+            "width": 0.57068,
+            "height": 0.594588
+          },
+          "rotation": {
+            "roll": 1.232068,
+            "pitch": -1.29767,
+            "yaw": -0.24529
+          },
+          "rotation_degrees": {
+            "roll": 70.59,
+            "pitch": -74.35,
+            "yaw": -14.05
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 2.098567,
+            "y": -2.374946,
+            "z": -0.949941
+          },
+          "size": {
+            "length": 0.57068,
+            "width": 0.594588,
+            "height": 0.389284
+          },
+          "rotation": {
+            "roll": 0.258307,
+            "pitch": 0.089753,
+            "yaw": 0.998443
+          },
+          "rotation_degrees": {
+            "roll": 14.8,
+            "pitch": 5.14,
+            "yaw": 57.21
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 2.098567,
+            "y": -2.374946,
+            "z": -0.949941
+          },
+          "size": {
+            "length": 0.594588,
+            "width": 0.389284,
+            "height": 0.57068
+          },
+          "rotation": {
+            "roll": 1.232068,
+            "pitch": -1.29767,
+            "yaw": -0.24529
+          },
+          "rotation_degrees": {
+            "roll": 70.59,
+            "pitch": -74.35,
+            "yaw": -14.05
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 2.098567,
+            "y": -2.374946,
+            "z": -0.949941
+          },
+          "size": {
+            "length": 0.57068,
+            "width": 0.389284,
+            "height": 0.594588
+          },
+          "rotation": {
+            "roll": 1.232068,
+            "pitch": -1.29767,
+            "yaw": -0.24529
+          },
+          "rotation_degrees": {
+            "roll": 70.59,
+            "pitch": -74.35,
+            "yaw": -14.05
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 2.098567,
+            "y": -2.374946,
+            "z": -0.949941
+          },
+          "size": {
+            "length": 0.594588,
+            "width": 0.57068,
+            "height": 0.389284
+          },
+          "rotation": {
+            "roll": 1.232068,
+            "pitch": -1.29767,
+            "yaw": -0.24529
+          },
+          "rotation_degrees": {
+            "roll": 70.59,
+            "pitch": -74.35,
+            "yaw": -14.05
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 2,
+        "position": {
+          "x": 0.574493,
+          "y": -1.40681,
+          "z": -0.489289
+        },
+        "size": {
+          "length": 0.310614,
+          "width": 0.379535,
+          "height": 0.559954
+        },
+        "rotation": {
+          "roll": 0.141188,
+          "pitch": -0.878262,
+          "yaw": 0.280436
+        },
+        "rotation_degrees": {
+          "roll": 8.09,
+          "pitch": -50.32,
+          "yaw": 16.07
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 0.574493,
+            "y": -1.40681,
+            "z": -0.489289
+          },
+          "size": {
+            "length": 0.310614,
+            "width": 0.379535,
+            "height": 0.559954
+          },
+          "rotation": {
+            "roll": 0.141188,
+            "pitch": -0.878262,
+            "yaw": 0.280436
+          },
+          "rotation_degrees": {
+            "roll": 8.09,
+            "pitch": -50.32,
+            "yaw": 16.07
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 0.574493,
+            "y": -1.40681,
+            "z": -0.489289
+          },
+          "size": {
+            "length": 0.310614,
+            "width": 0.559954,
+            "height": 0.379535
+          },
+          "rotation": {
+            "roll": 0.141188,
+            "pitch": -0.878262,
+            "yaw": 0.280436
+          },
+          "rotation_degrees": {
+            "roll": 8.09,
+            "pitch": -50.32,
+            "yaw": 16.07
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 0.574493,
+            "y": -1.40681,
+            "z": -0.489289
+          },
+          "size": {
+            "length": 0.559954,
+            "width": 0.379535,
+            "height": 0.310614
+          },
+          "rotation": {
+            "roll": 0.116215,
+            "pitch": 0.684308,
+            "yaw": 0.463057
+          },
+          "rotation_degrees": {
+            "roll": 6.66,
+            "pitch": 39.21,
+            "yaw": 26.53
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 0.574493,
+            "y": -1.40681,
+            "z": -0.489289
+          },
+          "size": {
+            "length": 0.379535,
+            "width": 0.310614,
+            "height": 0.559954
+          },
+          "rotation": {
+            "roll": 0.141188,
+            "pitch": -0.878262,
+            "yaw": 0.280436
+          },
+          "rotation_degrees": {
+            "roll": 8.09,
+            "pitch": -50.32,
+            "yaw": 16.07
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 0.574493,
+            "y": -1.40681,
+            "z": -0.489289
+          },
+          "size": {
+            "length": 0.559954,
+            "width": 0.310614,
+            "height": 0.379535
+          },
+          "rotation": {
+            "roll": 0.141188,
+            "pitch": -0.878262,
+            "yaw": 0.280436
+          },
+          "rotation_degrees": {
+            "roll": 8.09,
+            "pitch": -50.32,
+            "yaw": 16.07
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 0.574493,
+            "y": -1.40681,
+            "z": -0.489289
+          },
+          "size": {
+            "length": 0.379535,
+            "width": 0.559954,
+            "height": 0.310614
+          },
+          "rotation": {
+            "roll": 0.141188,
+            "pitch": -0.878262,
+            "yaw": 0.280436
+          },
+          "rotation_degrees": {
+            "roll": 8.09,
+            "pitch": -50.32,
+            "yaw": 16.07
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 3,
+        "position": {
+          "x": 2.523576,
+          "y": -2.467506,
+          "z": 0.111639
+        },
+        "size": {
+          "length": 0.579256,
+          "width": 0.4361,
+          "height": 0.362192
+        },
+        "rotation": {
+          "roll": 1.436377,
+          "pitch": -0.513353,
+          "yaw": -1.279427
+        },
+        "rotation_degrees": {
+          "roll": 82.3,
+          "pitch": -29.41,
+          "yaw": -73.31
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 2.523576,
+            "y": -2.467506,
+            "z": 0.111639
+          },
+          "size": {
+            "length": 0.579256,
+            "width": 0.4361,
+            "height": 0.362192
+          },
+          "rotation": {
+            "roll": 1.436377,
+            "pitch": -0.513353,
+            "yaw": -1.279427
+          },
+          "rotation_degrees": {
+            "roll": 82.3,
+            "pitch": -29.41,
+            "yaw": -73.31
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 2.523576,
+            "y": -2.467506,
+            "z": 0.111639
+          },
+          "size": {
+            "length": 0.579256,
+            "width": 0.362192,
+            "height": 0.4361
+          },
+          "rotation": {
+            "roll": 1.436377,
+            "pitch": -0.513353,
+            "yaw": -1.279427
+          },
+          "rotation_degrees": {
+            "roll": 82.3,
+            "pitch": -29.41,
+            "yaw": -73.31
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 2.523576,
+            "y": -2.467506,
+            "z": 0.111639
+          },
+          "size": {
+            "length": 0.362192,
+            "width": 0.4361,
+            "height": 0.579256
+          },
+          "rotation": {
+            "roll": 1.053557,
+            "pitch": 0.117007,
+            "yaw": 0.225053
+          },
+          "rotation_degrees": {
+            "roll": 60.36,
+            "pitch": 6.7,
+            "yaw": 12.89
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 2.523576,
+            "y": -2.467506,
+            "z": 0.111639
+          },
+          "size": {
+            "length": 0.4361,
+            "width": 0.579256,
+            "height": 0.362192
+          },
+          "rotation": {
+            "roll": 1.436377,
+            "pitch": -0.513353,
+            "yaw": -1.279427
+          },
+          "rotation_degrees": {
+            "roll": 82.3,
+            "pitch": -29.41,
+            "yaw": -73.31
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 2.523576,
+            "y": -2.467506,
+            "z": 0.111639
+          },
+          "size": {
+            "length": 0.362192,
+            "width": 0.579256,
+            "height": 0.4361
+          },
+          "rotation": {
+            "roll": 1.436377,
+            "pitch": -0.513353,
+            "yaw": -1.279427
+          },
+          "rotation_degrees": {
+            "roll": 82.3,
+            "pitch": -29.41,
+            "yaw": -73.31
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 2.523576,
+            "y": -2.467506,
+            "z": 0.111639
+          },
+          "size": {
+            "length": 0.4361,
+            "width": 0.362192,
+            "height": 0.579256
+          },
+          "rotation": {
+            "roll": 1.436377,
+            "pitch": -0.513353,
+            "yaw": -1.279427
+          },
+          "rotation_degrees": {
+            "roll": 82.3,
+            "pitch": -29.41,
+            "yaw": -73.31
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 4,
+        "position": {
+          "x": 0.741791,
+          "y": 1.737472,
+          "z": -0.292548
+        },
+        "size": {
+          "length": 0.622851,
+          "width": 0.591893,
+          "height": 0.514491
+        },
+        "rotation": {
+          "roll": 1.486337,
+          "pitch": -0.381596,
+          "yaw": 0.16349
+        },
+        "rotation_degrees": {
+          "roll": 85.16,
+          "pitch": -21.86,
+          "yaw": 9.37
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 0.741791,
+            "y": 1.737472,
+            "z": -0.292548
+          },
+          "size": {
+            "length": 0.622851,
+            "width": 0.591893,
+            "height": 0.514491
+          },
+          "rotation": {
+            "roll": 1.486337,
+            "pitch": -0.381596,
+            "yaw": 0.16349
+          },
+          "rotation_degrees": {
+            "roll": 85.16,
+            "pitch": -21.86,
+            "yaw": 9.37
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 0.741791,
+            "y": 1.737472,
+            "z": -0.292548
+          },
+          "size": {
+            "length": 0.622851,
+            "width": 0.514491,
+            "height": 0.591893
+          },
+          "rotation": {
+            "roll": 1.486337,
+            "pitch": -0.381596,
+            "yaw": 0.16349
+          },
+          "rotation_degrees": {
+            "roll": 85.16,
+            "pitch": -21.86,
+            "yaw": 9.37
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 0.741791,
+            "y": 1.737472,
+            "z": -0.292548
+          },
+          "size": {
+            "length": 0.514491,
+            "width": 0.591893,
+            "height": 0.622851
+          },
+          "rotation": {
+            "roll": 1.486337,
+            "pitch": -0.381596,
+            "yaw": 0.16349
+          },
+          "rotation_degrees": {
+            "roll": 85.16,
+            "pitch": -21.86,
+            "yaw": 9.37
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 0.741791,
+            "y": 1.737472,
+            "z": -0.292548
+          },
+          "size": {
+            "length": 0.591893,
+            "width": 0.622851,
+            "height": 0.514491
+          },
+          "rotation": {
+            "roll": 1.486337,
+            "pitch": -0.381596,
+            "yaw": 0.16349
+          },
+          "rotation_degrees": {
+            "roll": 85.16,
+            "pitch": -21.86,
+            "yaw": 9.37
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 0.741791,
+            "y": 1.737472,
+            "z": -0.292548
+          },
+          "size": {
+            "length": 0.514491,
+            "width": 0.622851,
+            "height": 0.591893
+          },
+          "rotation": {
+            "roll": 1.486337,
+            "pitch": -0.381596,
+            "yaw": 0.16349
+          },
+          "rotation_degrees": {
+            "roll": 85.16,
+            "pitch": -21.86,
+            "yaw": 9.37
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 0.741791,
+            "y": 1.737472,
+            "z": -0.292548
+          },
+          "size": {
+            "length": 0.591893,
+            "width": 0.514491,
+            "height": 0.622851
+          },
+          "rotation": {
+            "roll": 1.486337,
+            "pitch": -0.381596,
+            "yaw": 0.16349
+          },
+          "rotation_degrees": {
+            "roll": 85.16,
+            "pitch": -21.86,
+            "yaw": 9.37
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 5,
+        "position": {
+          "x": 2.573512,
+          "y": 0.592599,
+          "z": 0.223414
+        },
+        "size": {
+          "length": 0.530941,
+          "width": 0.581829,
+          "height": 0.31833
+        },
+        "rotation": {
+          "roll": -0.854833,
+          "pitch": -0.661657,
+          "yaw": -1.320122
+        },
+        "rotation_degrees": {
+          "roll": -48.98,
+          "pitch": -37.91,
+          "yaw": -75.64
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 2.573512,
+            "y": 0.592599,
+            "z": 0.223414
+          },
+          "size": {
+            "length": 0.530941,
+            "width": 0.581829,
+            "height": 0.31833
+          },
+          "rotation": {
+            "roll": -0.854833,
+            "pitch": -0.661657,
+            "yaw": -1.320122
+          },
+          "rotation_degrees": {
+            "roll": -48.98,
+            "pitch": -37.91,
+            "yaw": -75.64
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 2.573512,
+            "y": 0.592599,
+            "z": 0.223414
+          },
+          "size": {
+            "length": 0.530941,
+            "width": 0.31833,
+            "height": 0.581829
+          },
+          "rotation": {
+            "roll": 0.715964,
+            "pitch": -0.661657,
+            "yaw": -1.320122
+          },
+          "rotation_degrees": {
+            "roll": 41.02,
+            "pitch": -37.91,
+            "yaw": -75.64
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 2.573512,
+            "y": 0.592599,
+            "z": 0.223414
+          },
+          "size": {
+            "length": 0.31833,
+            "width": 0.581829,
+            "height": 0.530941
+          },
+          "rotation": {
+            "roll": -0.854833,
+            "pitch": -0.661657,
+            "yaw": -1.320122
+          },
+          "rotation_degrees": {
+            "roll": -48.98,
+            "pitch": -37.91,
+            "yaw": -75.64
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 2.573512,
+            "y": 0.592599,
+            "z": 0.223414
+          },
+          "size": {
+            "length": 0.581829,
+            "width": 0.530941,
+            "height": 0.31833
+          },
+          "rotation": {
+            "roll": -0.870495,
+            "pitch": 0.637578,
+            "yaw": -0.364251
+          },
+          "rotation_degrees": {
+            "roll": -49.88,
+            "pitch": 36.53,
+            "yaw": -20.87
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 2.573512,
+            "y": 0.592599,
+            "z": 0.223414
+          },
+          "size": {
+            "length": 0.31833,
+            "width": 0.530941,
+            "height": 0.581829
+          },
+          "rotation": {
+            "roll": 0.700301,
+            "pitch": 0.637578,
+            "yaw": -0.364251
+          },
+          "rotation_degrees": {
+            "roll": 40.12,
+            "pitch": 36.53,
+            "yaw": -20.87
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 2.573512,
+            "y": 0.592599,
+            "z": 0.223414
+          },
+          "size": {
+            "length": 0.581829,
+            "width": 0.31833,
+            "height": 0.530941
+          },
+          "rotation": {
+            "roll": -0.801247,
+            "pitch": -0.544324,
+            "yaw": 0.741555
+          },
+          "rotation_degrees": {
+            "roll": -45.91,
+            "pitch": -31.19,
+            "yaw": 42.49
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 6,
+        "position": {
+          "x": 1.081977,
+          "y": -1.994993,
+          "z": -0.944053
+        },
+        "size": {
+          "length": 0.554274,
+          "width": 0.445933,
+          "height": 0.448072
+        },
+        "rotation": {
+          "roll": -0.912611,
+          "pitch": -0.732061,
+          "yaw": 1.371791
+        },
+        "rotation_degrees": {
+          "roll": -52.29,
+          "pitch": -41.94,
+          "yaw": 78.6
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 1.081977,
+            "y": -1.994993,
+            "z": -0.944053
+          },
+          "size": {
+            "length": 0.554274,
+            "width": 0.445933,
+            "height": 0.448072
+          },
+          "rotation": {
+            "roll": -0.912611,
+            "pitch": -0.732061,
+            "yaw": 1.371791
+          },
+          "rotation_degrees": {
+            "roll": -52.29,
+            "pitch": -41.94,
+            "yaw": 78.6
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 1.081977,
+            "y": -1.994993,
+            "z": -0.944053
+          },
+          "size": {
+            "length": 0.554274,
+            "width": 0.448072,
+            "height": 0.445933
+          },
+          "rotation": {
+            "roll": 0.658186,
+            "pitch": -0.732061,
+            "yaw": 1.371791
+          },
+          "rotation_degrees": {
+            "roll": 37.71,
+            "pitch": -41.94,
+            "yaw": 78.6
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 1.081977,
+            "y": -1.994993,
+            "z": -0.944053
+          },
+          "size": {
+            "length": 0.448072,
+            "width": 0.445933,
+            "height": 0.554274
+          },
+          "rotation": {
+            "roll": -0.721845,
+            "pitch": 0.472337,
+            "yaw": 0.278
+          },
+          "rotation_degrees": {
+            "roll": -41.36,
+            "pitch": 27.06,
+            "yaw": 15.93
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 1.081977,
+            "y": -1.994993,
+            "z": -0.944053
+          },
+          "size": {
+            "length": 0.445933,
+            "width": 0.554274,
+            "height": 0.448072
+          },
+          "rotation": {
+            "roll": -0.912611,
+            "pitch": -0.732061,
+            "yaw": 1.371791
+          },
+          "rotation_degrees": {
+            "roll": -52.29,
+            "pitch": -41.94,
+            "yaw": 78.6
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 1.081977,
+            "y": -1.994993,
+            "z": -0.944053
+          },
+          "size": {
+            "length": 0.448072,
+            "width": 0.554274,
+            "height": 0.445933
+          },
+          "rotation": {
+            "roll": -0.912611,
+            "pitch": -0.732061,
+            "yaw": 1.371791
+          },
+          "rotation_degrees": {
+            "roll": -52.29,
+            "pitch": -41.94,
+            "yaw": 78.6
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 1.081977,
+            "y": -1.994993,
+            "z": -0.944053
+          },
+          "size": {
+            "length": 0.445933,
+            "width": 0.448072,
+            "height": 0.554274
+          },
+          "rotation": {
+            "roll": -0.912611,
+            "pitch": -0.732061,
+            "yaw": 1.371791
+          },
+          "rotation_degrees": {
+            "roll": -52.29,
+            "pitch": -41.94,
+            "yaw": 78.6
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 7,
+        "position": {
+          "x": 2.120088,
+          "y": 0.545655,
+          "z": -1.157723
+        },
+        "size": {
+          "length": 0.591651,
+          "width": 0.365361,
+          "height": 0.451782
+        },
+        "rotation": {
+          "roll": 1.537883,
+          "pitch": 0.439822,
+          "yaw": 0.178913
+        },
+        "rotation_degrees": {
+          "roll": 88.11,
+          "pitch": 25.2,
+          "yaw": 10.25
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 2.120088,
+            "y": 0.545655,
+            "z": -1.157723
+          },
+          "size": {
+            "length": 0.591651,
+            "width": 0.365361,
+            "height": 0.451782
+          },
+          "rotation": {
+            "roll": 1.537883,
+            "pitch": 0.439822,
+            "yaw": 0.178913
+          },
+          "rotation_degrees": {
+            "roll": 88.11,
+            "pitch": 25.2,
+            "yaw": 10.25
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 2.120088,
+            "y": 0.545655,
+            "z": -1.157723
+          },
+          "size": {
+            "length": 0.591651,
+            "width": 0.451782,
+            "height": 0.365361
+          },
+          "rotation": {
+            "roll": 1.537883,
+            "pitch": 0.439822,
+            "yaw": 0.178913
+          },
+          "rotation_degrees": {
+            "roll": 88.11,
+            "pitch": 25.2,
+            "yaw": 10.25
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 2.120088,
+            "y": 0.545655,
+            "z": -1.157723
+          },
+          "size": {
+            "length": 0.451782,
+            "width": 0.365361,
+            "height": 0.591651
+          },
+          "rotation": {
+            "roll": 1.537883,
+            "pitch": 0.439822,
+            "yaw": 0.178913
+          },
+          "rotation_degrees": {
+            "roll": 88.11,
+            "pitch": 25.2,
+            "yaw": 10.25
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 2.120088,
+            "y": 0.545655,
+            "z": -1.157723
+          },
+          "size": {
+            "length": 0.365361,
+            "width": 0.591651,
+            "height": 0.451782
+          },
+          "rotation": {
+            "roll": 1.500978,
+            "pitch": -1.129825,
+            "yaw": 0.256089
+          },
+          "rotation_degrees": {
+            "roll": 86.0,
+            "pitch": -64.73,
+            "yaw": 14.67
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 2.120088,
+            "y": 0.545655,
+            "z": -1.157723
+          },
+          "size": {
+            "length": 0.451782,
+            "width": 0.591651,
+            "height": 0.365361
+          },
+          "rotation": {
+            "roll": 1.537883,
+            "pitch": 0.439822,
+            "yaw": 0.178913
+          },
+          "rotation_degrees": {
+            "roll": 88.11,
+            "pitch": 25.2,
+            "yaw": 10.25
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 2.120088,
+            "y": 0.545655,
+            "z": -1.157723
+          },
+          "size": {
+            "length": 0.365361,
+            "width": 0.451782,
+            "height": 0.591651
+          },
+          "rotation": {
+            "roll": 1.537883,
+            "pitch": 0.439822,
+            "yaw": 0.178913
+          },
+          "rotation_degrees": {
+            "roll": 88.11,
+            "pitch": 25.2,
+            "yaw": 10.25
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 8,
+        "position": {
+          "x": 2.211536,
+          "y": 1.71426,
+          "z": 0.052
+        },
+        "size": {
+          "length": 0.391619,
+          "width": 0.31284,
+          "height": 0.426181
+        },
+        "rotation": {
+          "roll": -0.729664,
+          "pitch": -0.907974,
+          "yaw": 1.391442
+        },
+        "rotation_degrees": {
+          "roll": -41.81,
+          "pitch": -52.02,
+          "yaw": 79.72
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 2.211536,
+            "y": 1.71426,
+            "z": 0.052
+          },
+          "size": {
+            "length": 0.391619,
+            "width": 0.31284,
+            "height": 0.426181
+          },
+          "rotation": {
+            "roll": -0.729664,
+            "pitch": -0.907974,
+            "yaw": 1.391442
+          },
+          "rotation_degrees": {
+            "roll": -41.81,
+            "pitch": -52.02,
+            "yaw": 79.72
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 2.211536,
+            "y": 1.71426,
+            "z": 0.052
+          },
+          "size": {
+            "length": 0.391619,
+            "width": 0.426181,
+            "height": 0.31284
+          },
+          "rotation": {
+            "roll": 0.841133,
+            "pitch": -0.907974,
+            "yaw": 1.391442
+          },
+          "rotation_degrees": {
+            "roll": 48.19,
+            "pitch": -52.02,
+            "yaw": 79.72
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 2.211536,
+            "y": 1.71426,
+            "z": 0.052
+          },
+          "size": {
+            "length": 0.426181,
+            "width": 0.31284,
+            "height": 0.391619
+          },
+          "rotation": {
+            "roll": -0.479824,
+            "pitch": 0.476505,
+            "yaw": 0.543097
+          },
+          "rotation_degrees": {
+            "roll": -27.49,
+            "pitch": 27.3,
+            "yaw": 31.12
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 2.211536,
+            "y": 1.71426,
+            "z": 0.052
+          },
+          "size": {
+            "length": 0.31284,
+            "width": 0.391619,
+            "height": 0.426181
+          },
+          "rotation": {
+            "roll": -0.729664,
+            "pitch": -0.907974,
+            "yaw": 1.391442
+          },
+          "rotation_degrees": {
+            "roll": -41.81,
+            "pitch": -52.02,
+            "yaw": 79.72
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 2.211536,
+            "y": 1.71426,
+            "z": 0.052
+          },
+          "size": {
+            "length": 0.426181,
+            "width": 0.391619,
+            "height": 0.31284
+          },
+          "rotation": {
+            "roll": -0.729664,
+            "pitch": -0.907974,
+            "yaw": 1.391442
+          },
+          "rotation_degrees": {
+            "roll": -41.81,
+            "pitch": -52.02,
+            "yaw": 79.72
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 2.211536,
+            "y": 1.71426,
+            "z": 0.052
+          },
+          "size": {
+            "length": 0.31284,
+            "width": 0.426181,
+            "height": 0.391619
+          },
+          "rotation": {
+            "roll": -0.729664,
+            "pitch": -0.907974,
+            "yaw": 1.391442
+          },
+          "rotation_degrees": {
+            "roll": -41.81,
+            "pitch": -52.02,
+            "yaw": 79.72
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 9,
+        "position": {
+          "x": 2.690919,
+          "y": -0.926611,
+          "z": -0.189123
+        },
+        "size": {
+          "length": 0.458253,
+          "width": 0.665819,
+          "height": 0.483541
+        },
+        "rotation": {
+          "roll": -0.738651,
+          "pitch": -0.795993,
+          "yaw": 0.192794
+        },
+        "rotation_degrees": {
+          "roll": -42.32,
+          "pitch": -45.61,
+          "yaw": 11.05
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 2.690919,
+            "y": -0.926611,
+            "z": -0.189123
+          },
+          "size": {
+            "length": 0.458253,
+            "width": 0.665819,
+            "height": 0.483541
+          },
+          "rotation": {
+            "roll": -0.738651,
+            "pitch": -0.795993,
+            "yaw": 0.192794
+          },
+          "rotation_degrees": {
+            "roll": -42.32,
+            "pitch": -45.61,
+            "yaw": 11.05
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 2.690919,
+            "y": -0.926611,
+            "z": -0.189123
+          },
+          "size": {
+            "length": 0.458253,
+            "width": 0.483541,
+            "height": 0.665819
+          },
+          "rotation": {
+            "roll": 0.832146,
+            "pitch": -0.795993,
+            "yaw": 0.192794
+          },
+          "rotation_degrees": {
+            "roll": 47.68,
+            "pitch": -45.61,
+            "yaw": 11.05
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 2.690919,
+            "y": -0.926611,
+            "z": -0.189123
+          },
+          "size": {
+            "length": 0.483541,
+            "width": 0.665819,
+            "height": 0.458253
+          },
+          "rotation": {
+            "roll": -0.582797,
+            "pitch": 0.543635,
+            "yaw": -0.712663
+          },
+          "rotation_degrees": {
+            "roll": -33.39,
+            "pitch": 31.15,
+            "yaw": -40.83
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 2.690919,
+            "y": -0.926611,
+            "z": -0.189123
+          },
+          "size": {
+            "length": 0.665819,
+            "width": 0.458253,
+            "height": 0.483541
+          },
+          "rotation": {
+            "roll": -0.944227,
+            "pitch": 0.490444,
+            "yaw": 1.18673
+          },
+          "rotation_degrees": {
+            "roll": -54.1,
+            "pitch": 28.1,
+            "yaw": 67.99
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 2.690919,
+            "y": -0.926611,
+            "z": -0.189123
+          },
+          "size": {
+            "length": 0.483541,
+            "width": 0.458253,
+            "height": 0.665819
+          },
+          "rotation": {
+            "roll": 0.62657,
+            "pitch": 0.490444,
+            "yaw": 1.18673
+          },
+          "rotation_degrees": {
+            "roll": 35.9,
+            "pitch": 28.1,
+            "yaw": 67.99
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 2.690919,
+            "y": -0.926611,
+            "z": -0.189123
+          },
+          "size": {
+            "length": 0.665819,
+            "width": 0.483541,
+            "height": 0.458253
+          },
+          "rotation": {
+            "roll": -0.738651,
+            "pitch": -0.795993,
+            "yaw": 0.192794
+          },
+          "rotation_degrees": {
+            "roll": -42.32,
+            "pitch": -45.61,
+            "yaw": 11.05
+          }
+        }
+      ]
+    },
+    {
+      "original_box": {
+        "id": 10,
+        "position": {
+          "x": 1.156854,
+          "y": 0.42293,
+          "z": 0.295646
+        },
+        "size": {
+          "length": 0.45976,
+          "width": 0.387728,
+          "height": 0.699015
+        },
+        "rotation": {
+          "roll": 0.029928,
+          "pitch": -1.285196,
+          "yaw": -1.422776
+        },
+        "rotation_degrees": {
+          "roll": 1.71,
+          "pitch": -73.64,
+          "yaw": -81.52
+        }
+      },
+      "equivalent_boxes": [
+        {
+          "equivalent_id": 1,
+          "position": {
+            "x": 1.156854,
+            "y": 0.42293,
+            "z": 0.295646
+          },
+          "size": {
+            "length": 0.45976,
+            "width": 0.387728,
+            "height": 0.699015
+          },
+          "rotation": {
+            "roll": 0.029928,
+            "pitch": -1.285196,
+            "yaw": -1.422776
+          },
+          "rotation_degrees": {
+            "roll": 1.71,
+            "pitch": -73.64,
+            "yaw": -81.52
+          }
+        },
+        {
+          "equivalent_id": 2,
+          "position": {
+            "x": 1.156854,
+            "y": 0.42293,
+            "z": 0.295646
+          },
+          "size": {
+            "length": 0.45976,
+            "width": 0.699015,
+            "height": 0.387728
+          },
+          "rotation": {
+            "roll": 0.029928,
+            "pitch": -1.285196,
+            "yaw": -1.422776
+          },
+          "rotation_degrees": {
+            "roll": 1.71,
+            "pitch": -73.64,
+            "yaw": -81.52
+          }
+        },
+        {
+          "equivalent_id": 3,
+          "position": {
+            "x": 1.156854,
+            "y": 0.42293,
+            "z": 0.295646
+          },
+          "size": {
+            "length": 0.699015,
+            "width": 0.387728,
+            "height": 0.45976
+          },
+          "rotation": {
+            "roll": 0.008786,
+            "pitch": 0.285469,
+            "yaw": -1.391585
+          },
+          "rotation_degrees": {
+            "roll": 0.5,
+            "pitch": 16.36,
+            "yaw": -79.73
+          }
+        },
+        {
+          "equivalent_id": 4,
+          "position": {
+            "x": 1.156854,
+            "y": 0.42293,
+            "z": 0.295646
+          },
+          "size": {
+            "length": 0.387728,
+            "width": 0.45976,
+            "height": 0.699015
+          },
+          "rotation": {
+            "roll": -1.285317,
+            "pitch": -0.00843,
+            "yaw": 0.176737
+          },
+          "rotation_degrees": {
+            "roll": -73.64,
+            "pitch": -0.48,
+            "yaw": 10.13
+          }
+        },
+        {
+          "equivalent_id": 5,
+          "position": {
+            "x": 1.156854,
+            "y": 0.42293,
+            "z": 0.295646
+          },
+          "size": {
+            "length": 0.699015,
+            "width": 0.45976,
+            "height": 0.387728
+          },
+          "rotation": {
+            "roll": 0.285479,
+            "pitch": -0.00843,
+            "yaw": 0.176737
+          },
+          "rotation_degrees": {
+            "roll": 16.36,
+            "pitch": -0.48,
+            "yaw": 10.13
+          }
+        },
+        {
+          "equivalent_id": 6,
+          "position": {
+            "x": 1.156854,
+            "y": 0.42293,
+            "z": 0.295646
+          },
+          "size": {
+            "length": 0.387728,
+            "width": 0.699015,
+            "height": 0.45976
+          },
+          "rotation": {
+            "roll": 0.029928,
+            "pitch": -1.285196,
+            "yaw": -1.422776
+          },
+          "rotation_degrees": {
+            "roll": 1.71,
+            "pitch": -73.64,
+            "yaw": -81.52
+          }
+        }
+      ]
+    }
+  ]
+}

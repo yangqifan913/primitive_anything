@@ -31,21 +31,21 @@ training:
   # 训练阶段配置 - 减少过拟合风险
   phases:
     teacher_forcing:
-      epochs: 1              # 减少从20->15
+      epochs: 15              # 减少从20->15
       teacher_forcing_ratio: 1.0
       scheduled_sampling: false
       sampling_strategy: "none"
       description: "完全Teacher Forcing阶段"
     
     scheduled_sampling:
-      epochs: 1              # 减少从30->20
+      epochs: 10              # 减少从30->20
       teacher_forcing_ratio: 1.0  # 从1.0衰减到0
       scheduled_sampling: true
       sampling_strategy: "inverse_sigmoid"
       description: "Scheduled Sampling过渡阶段"
     
     pure_generation:
-      epochs: 1             # 大幅减少从250->100，防止过拟合
+      epochs: 55             # 大幅减少从250->100，防止过拟合
       teacher_forcing_ratio: 0.0
       scheduled_sampling: false
       sampling_strategy: "none"
@@ -62,11 +62,11 @@ training:
   # 学习率调度 - 更精细的调度策略
   scheduler:
     type: "CosineAnnealingWarmRestarts"  # 使用带重启的余弦退火
-    T_0: 100                  # 第一次重启的周期
-    T_mult: 2                 # 重启后周期倍增
+    T_0: 45                  # 第一次重启的周期
+    T_mult: 1                 # 重启后周期倍增
     eta_min: 0.000001         # 最小学习率
   
-  # 训练优化 - 增强泛化性
+  # 训练优化 - 增性
   optimizations:
     early_stopping:
       enabled: true
@@ -134,14 +134,14 @@ model:
     depth: 6
     heads: 8
     dim_head: 64
-    attn_dropout: 0.0         # ✅ 实际生效：注意力dropout
-    ff_dropout: 0.0           # ✅ 实际生效：前馈dropout
+    attn_dropout: 0.15         # ✅ 实际生效：注意力dropout
+    ff_dropout: 0.15           # ✅ 实际生效：前馈dropout
     # use_rotary_emb: true
     # rotary_emb_dim: 32
   
   # 离散化配置 - 3个属性
   discretization:
-    num_discrete_position: 64  # 位置属性 (x, y, z)
+    num_discrete_position: 128  # 位置属性 (x, y, z)
     num_discrete_rotation: 64  # 旋转属性 (roll, pitch, yaw)
     num_discrete_size: 64     # 尺寸属性 (w, h, l)
   
@@ -185,18 +185,18 @@ model:
 data:
   # 数据集设置
   dataset:
-    data_root: "sim_data"
+    data_root: "sim_data_bak"
     
   # 3D属性范围 - 3个属性
   continuous_ranges:
     position: [[0.5, 3.0], [-2.5, 2.5], [-1.5, 0.5]]  # 位置属性 (x, y, z)
-    rotation: [[-90.0, 90.0], [-90.0, 90.0], [-90.0, 90.0]]  # 旋转属性 (roll, pitch, yaw) 角度
+    rotation: [[-60.0, 60.0], [-60.0, 60.0], [-60.0, 60.0]]  # 旋转属性 (roll, pitch, yaw) 角度
     size: [[0.3, 0.7], [0.3, 0.7], [0.3, 0.7]]  # 尺寸属性 (l, w, h)
   
   # DataLoader设置
   dataloader:
-    batch_size: 2
-    num_workers: 2
+    batch_size: 4
+    num_workers: 4
     pin_memory: true
     prefetch_factor: 2
     persistent_workers: true
@@ -322,9 +322,9 @@ loss:
   # 基础权重 - 重新平衡
   base_weights:
     classification: 1.2       # 增加分类权重从1.0->1.2
-    delta: 1.8               # 降低delta权重从2.0->1.8
+    delta: 1.0               # 降低delta权重从2.0->1.8
     eos: 1.5                # 降低eos权重从2.0->1.5
-    iou: 1.2                # 增加iou权重从1.0->1.2
+    iou: 0.2                # 增加iou权重从1.0->1.2
   
   # 自适应权重 - 优化范围
   adaptive_weights:

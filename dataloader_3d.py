@@ -117,12 +117,28 @@ def apply_local_rotation_scipy(roll, pitch, yaw, axis, angle):
     
     return euler_new[0], euler_new[1], euler_new[2]
 
+def signed_perm_matrices(det_keep=1):
+    """生成所有 signed permutation 矩阵，保留 det == det_keep（det_keep=+1 -> 24 个）"""
+    import numpy as np
+    from itertools import permutations, product
+    
+    mats = []
+    for perm in permutations([0, 1, 2]):
+        for signs in product([1, -1], repeat=3):
+            S = np.zeros((3, 3), dtype=int)
+            for i, p in enumerate(perm):
+                S[i, p] = signs[i]
+            d = int(round(np.linalg.det(S)))
+            if d == det_keep:
+                mats.append(S)
+    return mats
+
 def generate_equivalent_box_representations(x, y, z, l, w, h, roll, pitch, yaw):
     """
-    生成box的所有等价表示
+    生成box的所有等价表示（基于test_box2.py的24个等效box）
     
-    正确的实现：通过尺寸排列的6种组合来表示相同的物理box
-    每种尺寸排列对应正确的坐标系转换后的欧拉角表示
+    每个box有24个等效表示：
+    - 使用signed permutation matrices生成24个orientation-preserving等效box
     
     Args:
         x, y, z: 位置坐标
@@ -133,48 +149,87 @@ def generate_equivalent_box_representations(x, y, z, l, w, h, roll, pitch, yaw):
         List of equivalent boxes: [(x, y, z, l, w, h, roll, pitch, yaw), ...]
     """
     import math
+    import numpy as np
+    from scipy.spatial.transform import Rotation as R_scipy
     
-    # 6种等价表示（通过不同的尺寸排列）
     equivalent_boxes = []
     
-    # 1. 原始表示: (l, w, h) + 原始角度
-    equivalent_boxes.append((x, y, z, l, w, h, roll, pitch, yaw))
+    # 获取原始旋转矩阵和半尺寸
+    half_sizes = np.array([l, w, h]) / 2.0
+    Rmat = R_scipy.from_euler("xyz", [roll, pitch, yaw]).as_matrix()
     
-    # 2. 尺寸排列 (l, h, w): 相当于绕length轴旋转90°
-    # length轴对应box的x轴，即世界坐标系的x轴
-    import math
-    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'x', math.pi/2)
-    equivalent_boxes.append((x, y, z, l, h, w, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
+    # 生成24个signed permutation matrices
+    Ss = signed_perm_matrices(det_keep=1)  # 24个矩阵
     
-    # 3. 尺寸排列 (h, w, l): 相当于绕width轴旋转90°
-    # width轴对应box的y轴，即世界坐标系的y轴
-    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'y', math.pi/2)
-    equivalent_boxes.append((x, y, z, h, w, l, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
-    
-    # 4. 尺寸排列 (w, l, h): 相当于绕height轴旋转90°
-    # height轴对应box的z轴，即世界坐标系的z轴
-    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'z', math.pi/2)
-    equivalent_boxes.append((x, y, z, w, l, h, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
-    
-    # 5. 尺寸排列 (h, l, w): 相当于绕length轴90° + 绕width轴90°
-    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'x', math.pi/2)
-    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(new_roll, new_pitch, new_yaw, 'y', math.pi/2)
-    equivalent_boxes.append((x, y, z, h, l, w, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
-    
-    # 6. 尺寸排列 (w, h, l): 相当于绕length轴90° + 绕height轴90°
-    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(roll, pitch, yaw, 'x', math.pi/2)
-    new_roll, new_pitch, new_yaw = apply_local_rotation_scipy(new_roll, new_pitch, new_yaw, 'z', math.pi/2)
-    equivalent_boxes.append((x, y, z, w, h, l, normalize_angle(new_roll), normalize_angle(new_pitch), normalize_angle(new_yaw)))
+    for S in Ss:
+        # R' = R * S^T
+        Rprime = Rmat @ S.T
+        half_prime = np.abs(S @ half_sizes)  # positive half sizes
+        
+        # 转换回欧拉角
+        euler_new = R_scipy.from_matrix(Rprime).as_euler('xyz')
+        
+        # 转换为我们的格式
+        new_l, new_w, new_h = half_prime[0] * 2, half_prime[1] * 2, half_prime[2] * 2
+        new_roll, new_pitch, new_yaw = euler_new[0], euler_new[1], euler_new[2]
+        
+        # 归一化角度到[-π, π]
+        r_norm = normalize_angle(new_roll)
+        p_norm = normalize_angle(new_pitch)
+        y_norm = normalize_angle(new_yaw)
+        
+        # 添加等效box
+        equivalent_boxes.append((x, y, z, new_l, new_w, new_h, r_norm, p_norm, y_norm))
     
     return equivalent_boxes
 
+def equivalent_box_from_columns(position, rpy, size, perm):
+    """
+    计算等效box（完全基于test_box.py的实现）
+    参数:
+        position: (3,) array-like
+        rpy: (3,) array-like, radians, euler xyz (roll,pitch,yaw)
+        size: (3,) array-like, [l, w, h]
+        perm: tuple of 3 ints, 表示 new_axis_i 对应 old_axis perm[i]
+              例如 perm=(1,0,2) 表示 new_x=old_y, new_y=old_x, new_z=old_z
+    返回:
+        center: (3,)
+        half_sizes: (3,)  (注意 Rerun 的 Boxes3D 接受的是 half_sizes)
+        quat_xyzw: (4,) 四元数按 [x,y,z,w]
+        euler_xyz: (3,) rpy（便于打印 / 调试）
+        was_reflection_fix: bool (是否做了 -1 列修正)
+    """
+    import numpy as np
+    from scipy.spatial.transform import Rotation as R_scipy
+    
+    pos = np.array(position, dtype=float)
+    size = np.array(size, dtype=float)
+    Rm = R_scipy.from_euler("xyz", rpy).as_matrix()            # world_from_local 的矩阵，列是局部 x,y,z 在世界坐标里的向量
+
+    # 新旋转矩阵的列直接从原矩阵按 permute 取列
+    Rnew = Rm[:, list(perm)].copy()
+
+    # 如果置换导致左手系（det < 0），把第 3 列乘 -1 修正为右手系
+    was_reflection_fix = False
+    if np.linalg.det(Rnew) < 0:
+        Rnew[:, 2] *= -1.0
+        was_reflection_fix = True
+
+    new_size = size[list(perm)]
+    half_sizes = new_size / 2.0
+
+    quat_xyzw = R_scipy.from_matrix(Rnew).as_quat()  # SciPy 保证是 [x,y,z,w]
+    euler_xyz = R_scipy.from_matrix(Rnew).as_euler("xyz")
+
+    return pos, half_sizes.tolist(), quat_xyzw.tolist(), euler_xyz.tolist(), was_reflection_fix
+
 def normalize_angle(angle):
-    """将角度归一化到[-π/2, π/2]范围（弧度）"""
+    """将角度归一化到[-π, π]范围（弧度）"""
     import math
-    while angle > math.pi/2:
-        angle -= math.pi
-    while angle < -math.pi/2:
-        angle += math.pi
+    while angle > math.pi:
+        angle -= 2 * math.pi
+    while angle < -math.pi:
+        angle += 2 * math.pi
     return angle
 
 def quaternion_to_euler_angles(quaternion):
@@ -445,6 +500,23 @@ class Box3DDataset(Dataset):
         w_clipped = np.clip(w, self.continuous_range_w[0], self.continuous_range_w[1])
         h_clipped = np.clip(h, self.continuous_range_h[0], self.continuous_range_h[1])
         l_clipped = np.clip(l, self.continuous_range_l[0], self.continuous_range_l[1])
+        
+        # 🔍 添加日志：检查原始数据和裁剪后的尺寸
+        for i in range(len(boxes)):
+            original_w, original_h, original_l = w[i], h[i], l[i]
+            clipped_w, clipped_h, clipped_l = w_clipped[i], h_clipped[i], l_clipped[i]
+            
+            if original_w <= 0 or original_h <= 0 or original_l <= 0:
+                print(f"🚨 数据预处理中发现无效原始尺寸 - Box {i}:")
+                print(f"   原始尺寸: w={original_w:.6f}, h={original_h:.6f}, l={original_l:.6f}")
+                print(f"   裁剪后尺寸: w={clipped_w:.6f}, h={clipped_h:.6f}, l={clipped_l:.6f}")
+                print(f"   原始位置: x={x[i]:.6f}, y={y[i]:.6f}, z={z[i]:.6f}")
+                print(f"   裁剪后位置: x={x_clipped[i]:.6f}, y={y_clipped[i]:.6f}, z={z_clipped[i]:.6f}")
+            
+            if clipped_w <= 0 or clipped_h <= 0 or clipped_l <= 0:
+                print(f"🚨 数据预处理后仍有无效尺寸 - Box {i}:")
+                print(f"   裁剪后尺寸: w={clipped_w:.6f}, h={clipped_h:.6f}, l={clipped_l:.6f}")
+                print(f"   尺寸范围: w_range={self.continuous_range_w}, h_range={self.continuous_range_h}, l_range={self.continuous_range_l}")
         
         # 将四元数转换为欧拉角
         euler_angles = quaternion_to_euler_angles(rotations)  # (N, 3) - [roll, pitch, yaw]
@@ -718,6 +790,11 @@ class Box3DDataset(Dataset):
         
         # Pad序列到固定长度
         x_padded, y_padded, z_padded, w_padded, h_padded, l_padded, roll_padded, pitch_padded, yaw_padded = self._pad_sequences(x, y, z, w, h, l, roll, pitch, yaw)
+        
+        # 🔧 修复：等效box也需要padding到固定长度
+        # 为padding位置添加空的等效box列表
+        while len(equivalent_boxes) < self.max_boxes:
+            equivalent_boxes.append([])  # 空列表表示padding位置
         
         # 转换图像格式：(H, W, 6) -> (6, H, W)
         rgbxyz_tensor = torch.from_numpy(rgbxyz).permute(2, 0, 1).float()
