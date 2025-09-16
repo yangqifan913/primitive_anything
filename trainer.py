@@ -2183,7 +2183,7 @@ class AdvancedTrainer:
             phase_start_epoch = sum(p.epochs for p in self.training_phases[:phase_idx])
             
             for epoch_in_phase in range(phase.epochs):
-                if self.current_epoch < phase_start_epoch + epoch_in_phase:
+                if self.current_epoch > phase_start_epoch + epoch_in_phase:
                     continue  # 跳过已训练的epoch
                 
                 # 🔧 修复：计算正确的阶段内epoch位置
