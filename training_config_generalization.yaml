@@ -31,21 +31,21 @@ training:
   # 训练阶段配置 - 减少过拟合风险
   phases:
     teacher_forcing:
-      epochs: 15              # 减少从20->15
+      epochs: 3              # 减少从20->15
       teacher_forcing_ratio: 1.0
       scheduled_sampling: false
       sampling_strategy: "none"
       description: "完全Teacher Forcing阶段"
     
     scheduled_sampling:
-      epochs: 10              # 减少从30->20
+      epochs: 3              # 减少从30->20
       teacher_forcing_ratio: 1.0  # 从1.0衰减到0
       scheduled_sampling: true
       sampling_strategy: "inverse_sigmoid"
       description: "Scheduled Sampling过渡阶段"
     
     pure_generation:
-      epochs: 55             # 大幅减少从250->100，防止过拟合
+      epochs: 3             # 大幅减少从250->100，防止过拟合
       teacher_forcing_ratio: 0.0
       scheduled_sampling: false
       sampling_strategy: "none"
@@ -134,8 +134,8 @@ model:
     depth: 6
     heads: 8
     dim_head: 64
-    attn_dropout: 0.15         # ✅ 实际生效：注意力dropout
-    ff_dropout: 0.15           # ✅ 实际生效：前馈dropout
+    attn_dropout: 0.1         # ✅ 实际生效：注意力dropout
+    ff_dropout: 0.1           # ✅ 实际生效：前馈dropout
     # use_rotary_emb: true
     # rotary_emb_dim: 32
   
@@ -147,6 +147,9 @@ model:
     num_discrete_w: 64
     num_discrete_h: 64
     num_discrete_l: 64
+    num_discrete_roll: 64
+    num_discrete_pitch: 64
+    num_discrete_yaw: 64
   
   # 嵌入维度
   embeddings:
@@ -156,6 +159,9 @@ model:
     dim_w_embed: 64
     dim_h_embed: 64
     dim_l_embed: 64
+    dim_roll_embed: 64
+    dim_pitch_embed: 64
+    dim_yaw_embed: 64
   
   # 条件化配置
   conditioning:
@@ -191,7 +197,7 @@ model:
 data:
   # 数据集设置
   dataset:
-    data_root: "sim_data_bak"
+    data_root: "sim_data"
     
   # 3D坐标和尺寸范围
   continuous_ranges:
@@ -201,6 +207,9 @@ data:
     w: [0.3, 0.7]
     h: [0.3, 0.7]
     l: [0.3, 0.7]
+    roll: [-1.5708, 1.5708]    # -90° to +90° (弧度)
+    pitch: [-1.5708, 1.5708]   # -90° to +90° (弧度)
+    yaw: [-1.5708, 1.5708]     # -90° to +90° (弧度)
   
   # DataLoader设置
   dataloader:

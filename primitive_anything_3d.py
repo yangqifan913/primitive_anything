@@ -380,29 +380,38 @@ class PrimitiveTransformer3D(nn.Module):
     def __init__(
         self,
         *,
-        # 离散化参数 - 3D坐标
+        # 离散化参数 - 3D坐标 + 旋转
         num_discrete_x = 128,
         num_discrete_y = 128,
         num_discrete_z = 128,  # 新增z坐标
         num_discrete_w = 64,
         num_discrete_h = 64,
         num_discrete_l = 64,  # 新增length维度
+        num_discrete_roll = 64,    # 新增roll旋转
+        num_discrete_pitch = 64,   # 新增pitch旋转
+        num_discrete_yaw = 64,     # 新增yaw旋转
         
-        # 连续范围 - 3D坐标
+        # 连续范围 - 3D坐标 + 旋转
         continuous_range_x = [0.5, 2.5],
         continuous_range_y = [-2, 2],
         continuous_range_z = [-1.5, 1.5],  # 新增z范围
         continuous_range_w = [0.3, 0.7],
         continuous_range_h = [0.3, 0.7],
         continuous_range_l = [0.3, 0.7],  # 新增length范围
+        continuous_range_roll = [-1.5708, 1.5708],    # 新增roll范围 (-90° to +90°)
+        continuous_range_pitch = [-1.5708, 1.5708],   # 新增pitch范围 (-90° to +90°)
+        continuous_range_yaw = [-1.5708, 1.5708],     # 新增yaw范围 (-90° to +90°)
         
-        # 嵌入维度 - 3D
+        # 嵌入维度 - 3D + 旋转
         dim_x_embed = 64,
         dim_y_embed = 64,
         dim_z_embed = 64,  # 新增z嵌入
         dim_w_embed = 32,
         dim_h_embed = 32,
         dim_l_embed = 32,  # 新增length嵌入
+        dim_roll_embed = 32,   # 新增roll嵌入
+        dim_pitch_embed = 32,  # 新增pitch嵌入
+        dim_yaw_embed = 32,    # 新增yaw嵌入
         
         # 模型参数
         dim = 512,
@@ -436,6 +445,9 @@ class PrimitiveTransformer3D(nn.Module):
         self.num_discrete_w = num_discrete_w
         self.num_discrete_h = num_discrete_h
         self.num_discrete_l = num_discrete_l  # 新增
+        self.num_discrete_roll = num_discrete_roll    # 新增
+        self.num_discrete_pitch = num_discrete_pitch   # 新增
+        self.num_discrete_yaw = num_discrete_yaw       # 新增
         
         # 3D连续范围
         self.continuous_range_x = continuous_range_x
@@ -444,12 +456,16 @@ class PrimitiveTransformer3D(nn.Module):
         self.continuous_range_w = continuous_range_w
         self.continuous_range_h = continuous_range_h
         self.continuous_range_l = continuous_range_l  # 新增
+        self.continuous_range_roll = continuous_range_roll    # 新增
+        self.continuous_range_pitch = continuous_range_pitch   # 新增
+        self.continuous_range_yaw = continuous_range_yaw       # 新增
         
         # 其他参数
         self.shape_cond_with_cat = shape_cond_with_cat
         self.condition_on_image = condition_on_image
         self.gateloop_depth = gateloop_depth
         self.gateloop_use_heinsen = gateloop_use_heinsen
+        self.pad_id = pad_id
         
         # 图像条件投影层
         if shape_cond_with_cat:
@@ -487,9 +503,14 @@ class PrimitiveTransformer3D(nn.Module):
         self.w_embed = nn.Embedding(num_discrete_w, dim_w_embed)
         self.h_embed = nn.Embedding(num_discrete_h, dim_h_embed)
         self.l_embed = nn.Embedding(num_discrete_l, dim_l_embed)  # 新增
+        self.roll_embed = nn.Embedding(num_discrete_roll, dim_roll_embed)    # 新增
+        self.pitch_embed = nn.Embedding(num_discrete_pitch, dim_pitch_embed)  # 新增
+        self.yaw_embed = nn.Embedding(num_discrete_yaw, dim_yaw_embed)        # 新增
         
-        # 投影层 - 更新总维度
-        total_embed_dim = dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed
+        # 投影层 - 更新总维度（包含旋转属性）
+        total_embed_dim = (dim_x_embed + dim_y_embed + dim_z_embed + 
+                          dim_w_embed + dim_h_embed + dim_l_embed +
+                          dim_roll_embed + dim_pitch_embed + dim_yaw_embed)
         self.project_in = nn.Linear(total_embed_dim, dim)
         
         # 连续值到embedding的转换层（用于属性间依赖）
@@ -499,6 +520,9 @@ class PrimitiveTransformer3D(nn.Module):
         self.continuous_to_w_embed = nn.Linear(1, dim_w_embed)
         self.continuous_to_h_embed = nn.Linear(1, dim_h_embed)
         self.continuous_to_l_embed = nn.Linear(1, dim_l_embed)
+        self.continuous_to_roll_embed = nn.Linear(1, dim_roll_embed)    # 新增
+        self.continuous_to_pitch_embed = nn.Linear(1, dim_pitch_embed)  # 新增
+        self.continuous_to_yaw_embed = nn.Linear(1, dim_yaw_embed)        # 新增
         
         # 解码器
         self.decoder = Decoder(
@@ -591,9 +615,47 @@ class PrimitiveTransformer3D(nn.Module):
             nn.Linear(dim, 1),
         )
         
-        # EOS预测网络
+        # 新增旋转属性预测头
+        self.to_roll_logits = nn.Sequential(
+            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed, dim),
+            nn.ReLU(),
+            nn.Linear(dim, num_discrete_roll),
+        )
+        
+        self.to_pitch_logits = nn.Sequential(
+            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_roll_embed, dim),
+            nn.ReLU(),
+            nn.Linear(dim, num_discrete_pitch),
+        )
+        
+        self.to_yaw_logits = nn.Sequential(
+            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_roll_embed + dim_pitch_embed, dim),
+            nn.ReLU(),
+            nn.Linear(dim, num_discrete_yaw),
+        )
+        
+        # 新增旋转属性delta预测头
+        self.to_roll_delta = nn.Sequential(
+            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 1),
+        )
+        
+        self.to_pitch_delta = nn.Sequential(
+            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_roll_embed, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 1),
+        )
+        
+        self.to_yaw_delta = nn.Sequential(
+            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_roll_embed + dim_pitch_embed, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 1),
+        )
+        
+        # EOS预测网络 - 更新输入维度（包含旋转属性）
         self.to_eos_logits = nn.Sequential(
-            nn.Linear(dim, dim),
+            nn.Linear(dim + dim_x_embed + dim_y_embed + dim_z_embed + dim_w_embed + dim_h_embed + dim_l_embed + dim_roll_embed + dim_pitch_embed + dim_yaw_embed, dim),
             nn.ReLU(),
             nn.Linear(dim, 1),
         )
@@ -633,6 +695,12 @@ class PrimitiveTransformer3D(nn.Module):
             return self.continuous_to_h_embed(continuous_value)
         elif attr_name == 'l':
             return self.continuous_to_l_embed(continuous_value)
+        elif attr_name == 'roll':
+            return self.continuous_to_roll_embed(continuous_value)
+        elif attr_name == 'pitch':
+            return self.continuous_to_pitch_embed(continuous_value)
+        elif attr_name == 'yaw':
+            return self.continuous_to_yaw_embed(continuous_value)
         else:
             raise ValueError(f"Unknown attribute: {attr_name}")
     
@@ -675,6 +743,21 @@ class PrimitiveTransformer3D(nn.Module):
             delta_head = self.to_l_delta
             num_bins = self.num_discrete_l
             value_range = self.continuous_range_l
+        elif attr_name == 'roll':
+            logits_head = self.to_roll_logits
+            delta_head = self.to_roll_delta
+            num_bins = self.num_discrete_roll
+            value_range = self.continuous_range_roll
+        elif attr_name == 'pitch':
+            logits_head = self.to_pitch_logits
+            delta_head = self.to_pitch_delta
+            num_bins = self.num_discrete_pitch
+            value_range = self.continuous_range_pitch
+        elif attr_name == 'yaw':
+            logits_head = self.to_yaw_logits
+            delta_head = self.to_yaw_delta
+            num_bins = self.num_discrete_yaw
+            value_range = self.continuous_range_yaw
         else:
             raise ValueError(f"Unknown attribute: {attr_name}")
         
@@ -779,7 +862,7 @@ class PrimitiveTransformer3D(nn.Module):
         continuous = discrete.float() / (num_discrete - 1) * (max_val - min_val) + min_val
         return continuous
     
-    def encode_primitive(self, x, y, z, w, h, l, primitive_mask):
+    def encode_primitive(self, x, y, z, w, h, l, roll, pitch, yaw, primitive_mask):
         """编码3D基本体参数"""
         # 检查是否有有效的框
         if x.numel() == 0 or y.numel() == 0 or z.numel() == 0 or w.numel() == 0 or h.numel() == 0 or l.numel() == 0:
@@ -791,51 +874,63 @@ class PrimitiveTransformer3D(nn.Module):
                             torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
                             torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
                             torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
+                            torch.zeros(batch_size, 0, dtype=torch.long, device=x.device),
                             torch.zeros(batch_size, 0, dtype=torch.long, device=x.device))
             return empty_embed, empty_discrete
         
         # 3D离散化
         discrete_x = self.discretize(x, self.num_discrete_x, self.continuous_range_x)
         discrete_y = self.discretize(y, self.num_discrete_y, self.continuous_range_y)
-        discrete_z = self.discretize(z, self.num_discrete_z, self.continuous_range_z)  # 新增
+        discrete_z = self.discretize(z, self.num_discrete_z, self.continuous_range_z)
         discrete_w = self.discretize(w, self.num_discrete_w, self.continuous_range_w)
         discrete_h = self.discretize(h, self.num_discrete_h, self.continuous_range_h)
-        discrete_l = self.discretize(l, self.num_discrete_l, self.continuous_range_l)  # 新增
+        discrete_l = self.discretize(l, self.num_discrete_l, self.continuous_range_l)
+        discrete_roll = self.discretize(roll, self.num_discrete_roll, self.continuous_range_roll)
+        discrete_pitch = self.discretize(pitch, self.num_discrete_pitch, self.continuous_range_pitch)
+        discrete_yaw = self.discretize(yaw, self.num_discrete_yaw, self.continuous_range_yaw)
         
         # 3D嵌入
         x_embed = self.x_embed(discrete_x)
         y_embed = self.y_embed(discrete_y)
-        z_embed = self.z_embed(discrete_z)  # 新增
+        z_embed = self.z_embed(discrete_z)
         w_embed = self.w_embed(discrete_w)
         h_embed = self.h_embed(discrete_h)
-        l_embed = self.l_embed(discrete_l)  # 新增
+        l_embed = self.l_embed(discrete_l)
+        roll_embed = self.roll_embed(discrete_roll)
+        pitch_embed = self.pitch_embed(discrete_pitch)
+        yaw_embed = self.yaw_embed(discrete_yaw)
         
-        # 组合3D特征
-        primitive_embed, _ = pack([x_embed, y_embed, z_embed, w_embed, h_embed, l_embed], 'b np *')
+        # 组合3D特征（包含旋转）
+        primitive_embed, _ = pack([x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed, yaw_embed], 'b np *')
         primitive_embed = self.project_in(primitive_embed)
         
         # 使用primitive_mask将无效位置的embedding设置为0
         primitive_embed = primitive_embed.masked_fill(~primitive_mask.unsqueeze(-1), 0.)
         
-        return primitive_embed, (discrete_x, discrete_y, discrete_z, discrete_w, discrete_h, discrete_l)
+        return primitive_embed, (discrete_x, discrete_y, discrete_z, discrete_w, discrete_h, discrete_l, discrete_roll, discrete_pitch, discrete_yaw)
     
     def forward(
         self,
         *,
         x: Tensor,
         y: Tensor,
-        z: Tensor,  # 新增z坐标
+        z: Tensor,
         w: Tensor,
         h: Tensor,
-        l: Tensor,  # 新增length
+        l: Tensor,
+        roll: Tensor,    # 新增
+        pitch: Tensor,   # 新增
+        yaw: Tensor,     # 新增
         image: Tensor,  # 现在是RGBXYZ，6通道
     ):
         """3D前向传播"""
-        # 创建3D mask
-        primitive_mask = (x != self.pad_id) & (y != self.pad_id) & (z != self.pad_id) & (w != self.pad_id) & (h != self.pad_id) & (l != self.pad_id)
+        # 创建3D mask（包含旋转属性）
+        primitive_mask = (x != self.pad_id) & (y != self.pad_id) & (z != self.pad_id) & (w != self.pad_id) & (h != self.pad_id) & (l != self.pad_id) & (roll != self.pad_id) & (pitch != self.pad_id) & (yaw != self.pad_id)
         
-        # 编码3D基本体
-        codes, discrete_coords = self.encode_primitive(x, y, z, w, h, l, primitive_mask)
+        # 编码3D基本体（包含旋转）
+        codes, discrete_coords = self.encode_primitive(x, y, z, w, h, l, roll, pitch, yaw, primitive_mask)
 
         # 编码RGBXYZ图像
         image_embed = self.image_encoder(image)  # [batch_size, H*W, image_encoder_dim]
@@ -886,28 +981,31 @@ class PrimitiveTransformer3D(nn.Module):
         w: Tensor,
         h: Tensor,
         l: Tensor,
+        roll: Tensor,    # 新增
+        pitch: Tensor,   # 新增
+        yaw: Tensor,     # 新增
         image: Tensor
     ):
         """带预测输出的前向传播，用于训练"""
         # 先调用标准前向传播获取attended_codes
         attended_codes = self.forward(
-            x=x, y=y, z=z, w=w, h=h, l=l, image=image
+            x=x, y=y, z=z, w=w, h=h, l=l, roll=roll, pitch=pitch, yaw=yaw, image=image
         )
         
         # attended_codes shape: [batch_size, seq_len, model_dim]
         batch_size, seq_len, _ = attended_codes.shape
         
         # 为每个序列位置计算预测
-        all_logits = {f'{attr}_logits': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
-        all_deltas = {f'{attr}_delta': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
-        all_continuous = {f'{attr}_continuous': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
+        all_logits = {f'{attr}_logits': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
+        all_deltas = {f'{attr}_delta': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
+        all_continuous = {f'{attr}_continuous': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
         eos_logits_list = []
         
         for t in range(seq_len):
             step_embed = attended_codes[:, t, :]  # [batch_size, model_dim]
             
             # 累积的embed用于后续属性预测
-            x_embed = y_embed = z_embed = w_embed = h_embed = None
+            x_embed = y_embed = z_embed = w_embed = h_embed = l_embed = roll_embed = pitch_embed = yaw_embed = None
             
             # 预测x坐标 - 使用连续值embedding
             x_logits, x_delta, x_continuous, x_embed = self.predict_attribute_with_continuous_embed(step_embed, 'x', prev_embeds=None, use_gumbel=None, temperature=1.0)
@@ -927,8 +1025,18 @@ class PrimitiveTransformer3D(nn.Module):
             # 预测l - 使用连续值embedding
             l_logits, l_delta, l_continuous, l_embed = self.predict_attribute_with_continuous_embed(step_embed, 'l', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed], use_gumbel=None, temperature=1.0)
             
-            # 预测EOS
-            eos_logit = self.to_eos_logits(step_embed).squeeze(-1)
+            # 预测roll - 使用连续值embedding
+            roll_logits, roll_delta, roll_continuous, roll_embed = self.predict_attribute_with_continuous_embed(step_embed, 'roll', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed], use_gumbel=None, temperature=1.0)
+            
+            # 预测pitch - 使用连续值embedding
+            pitch_logits, pitch_delta, pitch_continuous, pitch_embed = self.predict_attribute_with_continuous_embed(step_embed, 'pitch', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed], use_gumbel=None, temperature=1.0)
+            
+            # 预测yaw - 使用连续值embedding
+            yaw_logits, yaw_delta, yaw_continuous, yaw_embed = self.predict_attribute_with_continuous_embed(step_embed, 'yaw', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed], use_gumbel=None, temperature=1.0)
+            
+            # 预测EOS - 传入所有属性的嵌入
+            combined_embeds = torch.cat([step_embed, x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed, yaw_embed], dim=-1)
+            eos_logit = self.to_eos_logits(combined_embeds).squeeze(-1)
             
             # 收集结果
             all_logits['x_logits'].append(x_logits)
@@ -937,6 +1045,9 @@ class PrimitiveTransformer3D(nn.Module):
             all_logits['w_logits'].append(w_logits)
             all_logits['h_logits'].append(h_logits)
             all_logits['l_logits'].append(l_logits)
+            all_logits['roll_logits'].append(roll_logits)
+            all_logits['pitch_logits'].append(pitch_logits)
+            all_logits['yaw_logits'].append(yaw_logits)
             
             all_deltas['x_delta'].append(x_delta)
             all_deltas['y_delta'].append(y_delta)
@@ -944,6 +1055,9 @@ class PrimitiveTransformer3D(nn.Module):
             all_deltas['w_delta'].append(w_delta)
             all_deltas['h_delta'].append(h_delta)
             all_deltas['l_delta'].append(l_delta)
+            all_deltas['roll_delta'].append(roll_delta)
+            all_deltas['pitch_delta'].append(pitch_delta)
+            all_deltas['yaw_delta'].append(yaw_delta)
             
             all_continuous['x_continuous'].append(x_continuous)
             all_continuous['y_continuous'].append(y_continuous)
@@ -951,6 +1065,9 @@ class PrimitiveTransformer3D(nn.Module):
             all_continuous['w_continuous'].append(w_continuous)
             all_continuous['h_continuous'].append(h_continuous)
             all_continuous['l_continuous'].append(l_continuous)
+            all_continuous['roll_continuous'].append(roll_continuous)
+            all_continuous['pitch_continuous'].append(pitch_continuous)
+            all_continuous['yaw_continuous'].append(yaw_continuous)
             
             eos_logits_list.append(eos_logit)
         
@@ -959,7 +1076,7 @@ class PrimitiveTransformer3D(nn.Module):
         delta_dict = {}
         continuous_dict = {}
         
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             logits_dict[f'{attr}_logits'] = torch.stack(all_logits[f'{attr}_logits'], dim=1)
             delta_dict[f'{attr}_delta'] = torch.stack(all_deltas[f'{attr}_delta'], dim=1)
             continuous_dict[f'{attr}_continuous'] = torch.stack(all_continuous[f'{attr}_continuous'], dim=1)
@@ -1261,7 +1378,10 @@ class PrimitiveTransformer3D(nn.Module):
             'z': [[] for _ in range(batch_size)],
             'w': [[] for _ in range(batch_size)],
             'h': [[] for _ in range(batch_size)],
-            'l': [[] for _ in range(batch_size)]
+            'l': [[] for _ in range(batch_size)],
+            'roll': [[] for _ in range(batch_size)],
+            'pitch': [[] for _ in range(batch_size)],
+            'yaw': [[] for _ in range(batch_size)],
         }
         
         stopped_samples = torch.zeros(batch_size, dtype=torch.bool, device=device)
@@ -1434,8 +1554,27 @@ class PrimitiveTransformer3D(nn.Module):
         # ✅ 直接使用l_continuous，与训练逻辑一致
         box_prediction['l'] = l_continuous
         
-        # EOS预测
-        eos_logits = self.to_eos_logits(next_embed).squeeze(-1)  # [B]
+        # 预测roll（绕x轴旋转）
+        roll_logits, roll_delta, roll_continuous, roll_embed = self.predict_attribute_with_continuous_embed(
+            next_embed, 'roll', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed], use_gumbel=False, temperature=temperature
+        )
+        box_prediction['roll'] = roll_continuous
+        
+        # 预测pitch（绕y轴旋转）
+        pitch_logits, pitch_delta, pitch_continuous, pitch_embed = self.predict_attribute_with_continuous_embed(
+            next_embed, 'pitch', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed], use_gumbel=False, temperature=temperature
+        )
+        box_prediction['pitch'] = pitch_continuous
+        
+        # 预测yaw（绕z轴旋转）
+        yaw_logits, yaw_delta, yaw_continuous, yaw_embed = self.predict_attribute_with_continuous_embed(
+            next_embed, 'yaw', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed], use_gumbel=False, temperature=temperature
+        )
+        box_prediction['yaw'] = yaw_continuous
+        
+        # EOS预测 - 传入所有属性的嵌入
+        combined_embeds = torch.cat([next_embed, x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed, yaw_embed], dim=-1)
+        eos_logits = self.to_eos_logits(combined_embeds).squeeze(-1)  # [B]
         eos_probs = torch.sigmoid(eos_logits)
         
         # 更新停止状态
@@ -1445,14 +1584,14 @@ class PrimitiveTransformer3D(nn.Module):
         # 保存生成结果（只为未停止的样本）
         for i in range(batch_size):
             if not state.stopped_samples[i]:
-                for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+                for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
                     # 保存tensor而不是float，以便后续stack操作
                     state.generated_boxes[attr][i].append(box_prediction[attr][i:i+1])  # 保持tensor形状
         
         # 🔧 修复Bug: 更新current_sequence以便下一步使用
         # 构建下一步的输入embedding
         next_embeds = []
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             continuous_val = box_prediction[attr]
             # 获取对应的离散化参数
             num_discrete = getattr(self, f'num_discrete_{attr}')
@@ -1573,7 +1712,7 @@ class PrimitiveTransformer3D(nn.Module):
             return None
         
         result = {}
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             result[attr] = torch.zeros(batch_size, max_len, device=device)
             
             for i in range(batch_size):

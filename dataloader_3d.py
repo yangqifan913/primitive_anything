@@ -81,6 +81,9 @@ class Box3DDataset(Dataset):
             self.continuous_range_w = continuous_ranges.get('w', [0.3, 0.7])
             self.continuous_range_h = continuous_ranges.get('h', [0.3, 0.7])
             self.continuous_range_l = continuous_ranges.get('l', [0.3, 0.7])
+            self.continuous_range_roll = continuous_ranges.get('roll', [-1.5708, 1.5708])
+            self.continuous_range_pitch = continuous_ranges.get('pitch', [-1.5708, 1.5708])
+            self.continuous_range_yaw = continuous_ranges.get('yaw', [-1.5708, 1.5708])
         else:
             # 使用默认值
             self.continuous_range_x = [0.5, 2.5]
@@ -89,6 +92,9 @@ class Box3DDataset(Dataset):
             self.continuous_range_w = [0.3, 0.7]
             self.continuous_range_h = [0.3, 0.7]
             self.continuous_range_l = [0.3, 0.7]
+            self.continuous_range_roll = [-1.5708, 1.5708]
+            self.continuous_range_pitch = [-1.5708, 1.5708]
+            self.continuous_range_yaw = [-1.5708, 1.5708]
         
         # 打印配置信息
         if self.augment:
@@ -177,12 +183,13 @@ class Box3DDataset(Dataset):
             print(f"加载标注失败 {json_file}: {e}")
             return []
     
-    def _normalize_coordinates(self, boxes: List[Dict]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _normalize_coordinates(self, boxes: List[Dict]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """提取box坐标和尺寸，进行范围裁剪，同时提取旋转信息（保持原始物理数值，不归一化）"""
         if not boxes:
             # 返回空数组
             return (np.array([]), np.array([]), np.array([]), 
                    np.array([]), np.array([]), np.array([]), 
+                   np.array([]), np.array([]), np.array([]),
                    np.array([]).reshape(0, 4))  # 旋转四元数
         
         # 提取坐标、尺寸和旋转
@@ -198,6 +205,14 @@ class Box3DDataset(Dataset):
         h = sizes[:, 2]  # height
         l = sizes[:, 0]  # length
         
+        # 将四元数转换为欧拉角
+        from scipy.spatial.transform import Rotation
+        r = Rotation.from_quat(rotations)
+        euler_angles = r.as_euler('xyz', degrees=False)  # 弧度制
+        roll = euler_angles[:, 0]
+        pitch = euler_angles[:, 1]
+        yaw = euler_angles[:, 2]
+        
         # 🔧 修复：不做归一化，保持原始数值
         # 只进行范围检查和裁剪到有效范围
         x_clipped = np.clip(x, self.continuous_range_x[0], self.continuous_range_x[1])
@@ -206,10 +221,13 @@ class Box3DDataset(Dataset):
         w_clipped = np.clip(w, self.continuous_range_w[0], self.continuous_range_w[1])
         h_clipped = np.clip(h, self.continuous_range_h[0], self.continuous_range_h[1])
         l_clipped = np.clip(l, self.continuous_range_l[0], self.continuous_range_l[1])
+        roll_clipped = np.clip(roll, self.continuous_range_roll[0], self.continuous_range_roll[1])
+        pitch_clipped = np.clip(pitch, self.continuous_range_pitch[0], self.continuous_range_pitch[1])
+        yaw_clipped = np.clip(yaw, self.continuous_range_yaw[0], self.continuous_range_yaw[1])
         
-        return x_clipped, y_clipped, z_clipped, w_clipped, h_clipped, l_clipped, rotations
+        return x_clipped, y_clipped, z_clipped, w_clipped, h_clipped, l_clipped, roll_clipped, pitch_clipped, yaw_clipped, rotations
     
-    def _pad_sequences(self, x, y, z, w, h, l, rotations) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _pad_sequences(self, x, y, z, w, h, l, roll, pitch, yaw, rotations) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """将序列pad到固定长度"""
         current_len = len(x)
         
@@ -217,6 +235,9 @@ class Box3DDataset(Dataset):
             # 如果没有box，返回全padding的tensor
             identity_quat = np.array([0.0, 0.0, 0.0, 1.0])  # 单位四元数 (x,y,z,w)
             return (torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
+                   torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
+                   torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
+                   torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
                    torch.full((self.max_boxes,), self.pad_id, dtype=torch.float32),
@@ -233,6 +254,9 @@ class Box3DDataset(Dataset):
             w = w[indices]
             h = h[indices]
             l = l[indices]
+            roll = roll[indices]
+            pitch = pitch[indices]
+            yaw = yaw[indices]
             rotations = rotations[indices]
         else:
             # 如果不足最大长度，进行padding
@@ -243,6 +267,9 @@ class Box3DDataset(Dataset):
             w = np.concatenate([w, np.full(pad_len, self.pad_id)])
             h = np.concatenate([h, np.full(pad_len, self.pad_id)])
             l = np.concatenate([l, np.full(pad_len, self.pad_id)])
+            roll = np.concatenate([roll, np.full(pad_len, self.pad_id)])
+            pitch = np.concatenate([pitch, np.full(pad_len, self.pad_id)])
+            yaw = np.concatenate([yaw, np.full(pad_len, self.pad_id)])
             
             # 为旋转数据padding使用单位四元数
             identity_quat = np.array([0.0, 0.0, 0.0, 1.0])  # 单位四元数 (x,y,z,w)
@@ -255,6 +282,9 @@ class Box3DDataset(Dataset):
                torch.from_numpy(w).float(),
                torch.from_numpy(h).float(),
                torch.from_numpy(l).float(),
+               torch.from_numpy(roll).float(),
+               torch.from_numpy(pitch).float(),
+               torch.from_numpy(yaw).float(),
                torch.from_numpy(rotations).float())
     
     def _augment_data(self, rgbxyz: np.ndarray, boxes: List[Dict]) -> Tuple[np.ndarray, List[Dict]]:
@@ -441,10 +471,10 @@ class Box3DDataset(Dataset):
         rgbxyz, boxes = self._augment_data(rgbxyz, boxes)
         
         # 归一化坐标并提取旋转信息
-        x, y, z, w, h, l, rotations = self._normalize_coordinates(boxes)
+        x, y, z, w, h, l, roll, pitch, yaw, rotations = self._normalize_coordinates(boxes)
         
         # Pad序列到固定长度
-        x_padded, y_padded, z_padded, w_padded, h_padded, l_padded, rotations_padded = self._pad_sequences(x, y, z, w, h, l, rotations)
+        x_padded, y_padded, z_padded, w_padded, h_padded, l_padded, roll_padded, pitch_padded, yaw_padded, rotations_padded = self._pad_sequences(x, y, z, w, h, l, roll, pitch, yaw, rotations)
         
         # 转换图像格式：(H, W, 6) -> (6, H, W)
         rgbxyz_tensor = torch.from_numpy(rgbxyz).permute(2, 0, 1).float()
@@ -466,6 +496,9 @@ class Box3DDataset(Dataset):
             'w': w_padded,          # (max_boxes,)
             'h': h_padded,          # (max_boxes,)
             'l': l_padded,          # (max_boxes,)
+            'roll': roll_padded,    # (max_boxes,)
+            'pitch': pitch_padded,  # (max_boxes,)
+            'yaw': yaw_padded,      # (max_boxes,)
             'rotations': rotations_padded,  # (max_boxes, 4) - 四元数旋转
             'folder_name': sample['folder_name']  # 用于调试
         }

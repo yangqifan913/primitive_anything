@@ -268,6 +268,9 @@ class AdvancedTrainer:
             num_discrete_w=discretization['num_discrete_w'],
             num_discrete_h=discretization['num_discrete_h'],
             num_discrete_l=discretization['num_discrete_l'],
+            num_discrete_roll=discretization['num_discrete_roll'],
+            num_discrete_pitch=discretization['num_discrete_pitch'],
+            num_discrete_yaw=discretization['num_discrete_yaw'],
             
             # 连续范围
             continuous_range_x=continuous_ranges['x'],
@@ -276,6 +279,9 @@ class AdvancedTrainer:
             continuous_range_w=continuous_ranges['w'],
             continuous_range_h=continuous_ranges['h'],
             continuous_range_l=continuous_ranges['l'],
+            continuous_range_roll=continuous_ranges['roll'],
+            continuous_range_pitch=continuous_ranges['pitch'],
+            continuous_range_yaw=continuous_ranges['yaw'],
             
             # 嵌入维度
             dim_x_embed=embeddings['dim_x_embed'],
@@ -284,6 +290,9 @@ class AdvancedTrainer:
             dim_w_embed=embeddings['dim_w_embed'],
             dim_h_embed=embeddings['dim_h_embed'],
             dim_l_embed=embeddings['dim_l_embed'],
+            dim_roll_embed=embeddings['dim_roll_embed'],
+            dim_pitch_embed=embeddings['dim_pitch_embed'],
+            dim_yaw_embed=embeddings['dim_yaw_embed'],
             
             # 模型参数
             max_primitive_len=global_config['max_seq_len'],
@@ -522,6 +531,9 @@ class AdvancedTrainer:
             num_discrete_w=discretization['num_discrete_w'],
             num_discrete_h=discretization['num_discrete_h'],
             num_discrete_l=discretization['num_discrete_l'],
+            num_discrete_roll=discretization['num_discrete_roll'],
+            num_discrete_pitch=discretization['num_discrete_pitch'],
+            num_discrete_yaw=discretization['num_discrete_yaw'],
             
             # 连续范围参数
             continuous_range_x=tuple(continuous_ranges['x']),
@@ -530,6 +542,9 @@ class AdvancedTrainer:
             continuous_range_w=tuple(continuous_ranges['w']),
             continuous_range_h=tuple(continuous_ranges['h']),
             continuous_range_l=tuple(continuous_ranges['l']),
+            continuous_range_roll=tuple(continuous_ranges['roll']),
+            continuous_range_pitch=tuple(continuous_ranges['pitch']),
+            continuous_range_yaw=tuple(continuous_ranges['yaw']),
             
             # 基础损失权重
             base_classification_weight=base_weights['classification'],
@@ -575,6 +590,9 @@ class AdvancedTrainer:
             'w': batch['w'].to(self.device),
             'h': batch['h'].to(self.device),
             'l': batch['l'].to(self.device),
+            'roll': batch['roll'].to(self.device),
+            'pitch': batch['pitch'].to(self.device),
+            'yaw': batch['yaw'].to(self.device),
         }
         
         # 获取模型
@@ -595,6 +613,9 @@ class AdvancedTrainer:
                 w=inputs['w'],
                 h=inputs['h'],
                 l=inputs['l'],
+                roll=inputs['roll'],
+                pitch=inputs['pitch'],
+                yaw=inputs['yaw'],
                 image=rgbxyz
             )
             return outputs
@@ -626,7 +647,7 @@ class AdvancedTrainer:
         
         # 构建混合输入序列（保持梯度）
         mixed_inputs = {}
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             continuous_pred = continuous_predictions[f'{attr}_continuous']  # [B, seq_len]
             # 确保维度匹配GT
             target_seq_len = targets[attr].shape[1]
@@ -674,6 +695,9 @@ class AdvancedTrainer:
             w=mixed_inputs['w'],
             h=mixed_inputs['h'],
             l=mixed_inputs['l'],
+            roll=mixed_inputs['roll'],
+            pitch=mixed_inputs['pitch'],
+            yaw=mixed_inputs['yaw'],
             image=rgbxyz
         )
     
@@ -723,9 +747,9 @@ class AdvancedTrainer:
         gateloop_cache = []
         
         # 存储每一步的输出
-        all_logits = {f'{attr}_logits': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
-        all_deltas = {f'{attr}_delta': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
-        all_continuous = {f'{attr}_continuous': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l']}
+        all_logits = {f'{attr}_logits': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
+        all_deltas = {f'{attr}_delta': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
+        all_continuous = {f'{attr}_continuous': [] for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']}
         all_eos_logits = []
         
         # 4. 逐步生成，使用真正的增量解码
@@ -793,8 +817,14 @@ class AdvancedTrainer:
             h_logits, h_delta, h_continuous, h_embed = model.predict_attribute_with_continuous_embed(step_embed, 'h', prev_embeds=[x_embed, y_embed, z_embed, w_embed], use_gumbel=True, temperature=gumbel_temp)
             l_logits, l_delta, l_continuous, l_embed = model.predict_attribute_with_continuous_embed(step_embed, 'l', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed], use_gumbel=True, temperature=gumbel_temp)
             
-            # EOS预测
-            eos_logits = model.to_eos_logits(step_embed).squeeze(-1)
+            # 预测旋转属性
+            roll_logits, roll_delta, roll_continuous, roll_embed = model.predict_attribute_with_continuous_embed(step_embed, 'roll', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed], use_gumbel=True, temperature=gumbel_temp)
+            pitch_logits, pitch_delta, pitch_continuous, pitch_embed = model.predict_attribute_with_continuous_embed(step_embed, 'pitch', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed], use_gumbel=True, temperature=gumbel_temp)
+            yaw_logits, yaw_delta, yaw_continuous, yaw_embed = model.predict_attribute_with_continuous_embed(step_embed, 'yaw', prev_embeds=[x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed], use_gumbel=True, temperature=gumbel_temp)
+            
+            # EOS预测 - 传入所有属性的嵌入
+            combined_embeds = torch.cat([step_embed, x_embed, y_embed, z_embed, w_embed, h_embed, l_embed, roll_embed, pitch_embed, yaw_embed], dim=-1)
+            eos_logits = model.to_eos_logits(combined_embeds).squeeze(-1)
             
             # 保存这一步的输出
             all_logits['x_logits'].append(x_logits)
@@ -803,6 +833,9 @@ class AdvancedTrainer:
             all_logits['w_logits'].append(w_logits)
             all_logits['h_logits'].append(h_logits)
             all_logits['l_logits'].append(l_logits)
+            all_logits['roll_logits'].append(roll_logits)
+            all_logits['pitch_logits'].append(pitch_logits)
+            all_logits['yaw_logits'].append(yaw_logits)
             
             all_deltas['x_delta'].append(x_delta)
             all_deltas['y_delta'].append(y_delta)
@@ -810,6 +843,9 @@ class AdvancedTrainer:
             all_deltas['w_delta'].append(w_delta)
             all_deltas['h_delta'].append(h_delta)
             all_deltas['l_delta'].append(l_delta)
+            all_deltas['roll_delta'].append(roll_delta)
+            all_deltas['pitch_delta'].append(pitch_delta)
+            all_deltas['yaw_delta'].append(yaw_delta)
             
             all_continuous['x_continuous'].append(x_continuous)
             all_continuous['y_continuous'].append(y_continuous)
@@ -817,6 +853,9 @@ class AdvancedTrainer:
             all_continuous['w_continuous'].append(w_continuous)
             all_continuous['h_continuous'].append(h_continuous)
             all_continuous['l_continuous'].append(l_continuous)
+            all_continuous['roll_continuous'].append(roll_continuous)
+            all_continuous['pitch_continuous'].append(pitch_continuous)
+            all_continuous['yaw_continuous'].append(yaw_continuous)
             
             all_eos_logits.append(eos_logits)
             
@@ -824,7 +863,8 @@ class AdvancedTrainer:
             # 这里需要创建新的embedding来加入到序列中
             next_embeds = []
             for attr, continuous_val in [('x', x_continuous), ('y', y_continuous), ('z', z_continuous), 
-                                       ('w', w_continuous), ('h', h_continuous), ('l', l_continuous)]:
+                                       ('w', w_continuous), ('h', h_continuous), ('l', l_continuous),
+                                       ('roll', roll_continuous), ('pitch', pitch_continuous), ('yaw', yaw_continuous)]:
                 # 获取对应的离散化参数
                 num_discrete = getattr(model, f'num_discrete_{attr}')
                 continuous_range = getattr(model, f'continuous_range_{attr}')
@@ -849,7 +889,7 @@ class AdvancedTrainer:
             'eos_logits': torch.stack(all_eos_logits, dim=1)  # [B, seq_len]
         }
         
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             result['logits_dict'][f'{attr}_logits'] = torch.stack(all_logits[f'{attr}_logits'], dim=1)
             result['delta_dict'][f'{attr}_delta'] = torch.stack(all_deltas[f'{attr}_delta'], dim=1)  
             result['continuous_dict'][f'{attr}_continuous'] = torch.stack(all_continuous[f'{attr}_continuous'], dim=1)
@@ -910,6 +950,9 @@ class AdvancedTrainer:
                     'w': batch['w'].to(self.device),
                     'h': batch['h'].to(self.device),
                     'l': batch['l'].to(self.device),
+                    'roll': batch['roll'].to(self.device),
+                    'pitch': batch['pitch'].to(self.device),
+                    'yaw': batch['yaw'].to(self.device),
                     'rotations': batch['rotations'].to(self.device),
                 }
                 
@@ -1020,6 +1063,9 @@ class AdvancedTrainer:
         total_w_error = 0.0
         total_h_error = 0.0
         total_l_error = 0.0
+        total_roll_error = 0.0
+        total_pitch_error = 0.0
+        total_yaw_error = 0.0
         total_overall_error = 0.0
         
         # 保存验证样本的推理结果
@@ -1037,6 +1083,9 @@ class AdvancedTrainer:
                     'w': batch['w'].to(self.device),
                     'h': batch['h'].to(self.device),
                     'l': batch['l'].to(self.device),
+                    'roll': batch['roll'].to(self.device),
+                    'pitch': batch['pitch'].to(self.device),
+                    'yaw': batch['yaw'].to(self.device),
                     'rotations': batch['rotations'].to(self.device),
                 }
                 
@@ -1106,6 +1155,9 @@ class AdvancedTrainer:
                 total_w_error += gen_metrics['w_error']
                 total_h_error += gen_metrics['h_error']
                 total_l_error += gen_metrics['l_error']
+                total_roll_error += gen_metrics['roll_error']
+                total_pitch_error += gen_metrics['pitch_error']
+                total_yaw_error += gen_metrics['yaw_error']
                 total_overall_error += gen_metrics['overall_mean_error']
                 
                 num_batches += 1
@@ -1169,6 +1221,9 @@ class AdvancedTrainer:
         avg_w_error = total_w_error / num_batches if num_batches > 0 else 0.0
         avg_h_error = total_h_error / num_batches if num_batches > 0 else 0.0
         avg_l_error = total_l_error / num_batches if num_batches > 0 else 0.0
+        avg_roll_error = total_roll_error / num_batches if num_batches > 0 else 0.0
+        avg_pitch_error = total_pitch_error / num_batches if num_batches > 0 else 0.0
+        avg_yaw_error = total_yaw_error / num_batches if num_batches > 0 else 0.0
         avg_overall_error = total_overall_error / num_batches if num_batches > 0 else 0.0
         
         # 返回结果 - 移除虚假的损失值
@@ -1188,6 +1243,9 @@ class AdvancedTrainer:
             'avg_w_error': avg_w_error,
             'avg_h_error': avg_h_error,
             'avg_l_error': avg_l_error,
+            'avg_roll_error': avg_roll_error,
+            'avg_pitch_error': avg_pitch_error,
+            'avg_yaw_error': avg_yaw_error,
             'avg_overall_error': avg_overall_error
         }
     
@@ -1290,7 +1348,13 @@ class AdvancedTrainer:
             'h': (self.model_config.get('num_discrete_h', 64), 
                   self.model_config.get('continuous_range_h', [0.1, 1.0])),
             'l': (self.model_config.get('num_discrete_l', 64), 
-                  self.model_config.get('continuous_range_l', [0.1, 1.0]))
+                  self.model_config.get('continuous_range_l', [0.1, 1.0])),
+            'roll': (self.model_config.get('num_discrete_roll', 64), 
+                     self.model_config.get('continuous_range_roll', [-1.5708, 1.5708])),
+            'pitch': (self.model_config.get('num_discrete_pitch', 64), 
+                      self.model_config.get('continuous_range_pitch', [-1.5708, 1.5708])),
+            'yaw': (self.model_config.get('num_discrete_yaw', 64), 
+                    self.model_config.get('continuous_range_yaw', [-1.5708, 1.5708]))
         }
         
         num_bins, value_range = attr_configs[attr]
@@ -1328,7 +1392,7 @@ class AdvancedTrainer:
             processed_gen_results = {}
             target_seq_len = targets['x'].shape[1]  # GT的序列长度
             
-            for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+            for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
                 if attr in gen_results:
                     # 获取生成结果（已经是连续值）
                     gen_values = gen_results[attr]  # [B, seq_len]
@@ -1350,11 +1414,11 @@ class AdvancedTrainer:
             # 计算IoU
             gen_iou = self._compute_generation_iou(processed_gen_results, targets, verbose)
             
-            # 计算6个维度的平均误差
+            # 计算9个维度的平均误差（包含旋转角度）
             dimension_errors = {}
             total_valid_predictions = 0
             
-            for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+            for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
                 if attr in processed_gen_results and attr in targets:
                     # 获取生成结果和目标值
                     gen_values = processed_gen_results[attr]  # [B, seq_len]
@@ -1372,14 +1436,26 @@ class AdvancedTrainer:
                         mean_error = valid_errors.mean().item()
                         dimension_errors[f'{attr}_error'] = mean_error
                         total_valid_predictions += valid_mask.sum().item()
+                        
+                        # 调试信息：打印角度相关的详细信息
+                        if attr in ['roll', 'pitch', 'yaw'] and verbose:
+                            print(f"🔍 调试 {attr} 角度误差:")
+                            print(f"   GT值范围: [{gt_values[valid_mask].min().item():.4f}, {gt_values[valid_mask].max().item():.4f}]")
+                            print(f"   预测值范围: [{gen_values[valid_mask].min().item():.4f}, {gen_values[valid_mask].max().item():.4f}]")
+                            print(f"   有效样本数: {valid_mask.sum().item()}")
+                            print(f"   平均误差: {mean_error:.4f}")
                     else:
                         dimension_errors[f'{attr}_error'] = 0.0
+                        if attr in ['roll', 'pitch', 'yaw'] and verbose:
+                            print(f"⚠️  {attr} 角度没有有效样本")
                 else:
                     dimension_errors[f'{attr}_error'] = 0.0
+                    if attr in ['roll', 'pitch', 'yaw'] and verbose:
+                        print(f"⚠️  {attr} 角度缺失: gen_results={attr in processed_gen_results}, targets={attr in targets}")
             
             # 计算总体平均误差
             if total_valid_predictions > 0:
-                overall_mean_error = sum(dimension_errors.values()) / 6.0
+                overall_mean_error = sum(dimension_errors.values()) / 9.0
             else:
                 overall_mean_error = 0.0
             
@@ -1409,7 +1485,10 @@ class AdvancedTrainer:
                 'z_error': dimension_errors['z_error'],
                 'w_error': dimension_errors['w_error'],
                 'h_error': dimension_errors['h_error'],
-                'l_error': dimension_errors['l_error']
+                'l_error': dimension_errors['l_error'],
+                'roll_error': dimension_errors['roll_error'],
+                'pitch_error': dimension_errors['pitch_error'],
+                'yaw_error': dimension_errors['yaw_error']
             }
             
             return metrics
@@ -1427,7 +1506,10 @@ class AdvancedTrainer:
                 'z_error': 1.0,
                 'w_error': 1.0,
                 'h_error': 1.0,
-                'l_error': 1.0
+                'l_error': 1.0,
+                'roll_error': 1.0,
+                'pitch_error': 1.0,
+                'yaw_error': 1.0
             }
     
     def _compute_generation_iou(self, gen_results: Dict, targets: Dict, verbose: bool = False) -> float:
@@ -1780,6 +1862,9 @@ class AdvancedTrainer:
         total_w_error = 0.0
         total_h_error = 0.0
         total_l_error = 0.0
+        total_roll_error = 0.0
+        total_pitch_error = 0.0
+        total_yaw_error = 0.0
         total_overall_error = 0.0
         num_batches = 0
         
@@ -1800,6 +1885,9 @@ class AdvancedTrainer:
                     'w': batch['w'].to(self.device),
                     'h': batch['h'].to(self.device),
                     'l': batch['l'].to(self.device),
+                    'roll': batch['roll'].to(self.device),
+                    'pitch': batch['pitch'].to(self.device),
+                    'yaw': batch['yaw'].to(self.device),
                     'rotations': batch['rotations'].to(self.device),
                 }
                 
@@ -1866,6 +1954,9 @@ class AdvancedTrainer:
                 total_w_error += gen_metrics['w_error']
                 total_h_error += gen_metrics['h_error']
                 total_l_error += gen_metrics['l_error']
+                total_roll_error += gen_metrics['roll_error']
+                total_pitch_error += gen_metrics['pitch_error']
+                total_yaw_error += gen_metrics['yaw_error']
                 total_overall_error += gen_metrics['overall_mean_error']
                 
                 # 保存详细结果
@@ -1915,6 +2006,9 @@ class AdvancedTrainer:
         avg_w_error = total_w_error / num_batches if num_batches > 0 else 0.0
         avg_h_error = total_h_error / num_batches if num_batches > 0 else 0.0
         avg_l_error = total_l_error / num_batches if num_batches > 0 else 0.0
+        avg_roll_error = total_roll_error / num_batches if num_batches > 0 else 0.0
+        avg_pitch_error = total_pitch_error / num_batches if num_batches > 0 else 0.0
+        avg_yaw_error = total_yaw_error / num_batches if num_batches > 0 else 0.0
         avg_overall_error = total_overall_error / num_batches if num_batches > 0 else 0.0
         
         # 保存测试结果到文件 - 只在主进程保存
@@ -1934,6 +2028,9 @@ class AdvancedTrainer:
                         'avg_w_error': avg_w_error,
                         'avg_h_error': avg_h_error,
                         'avg_l_error': avg_l_error,
+                        'avg_roll_error': avg_roll_error,
+                        'avg_pitch_error': avg_pitch_error,
+                        'avg_yaw_error': avg_yaw_error,
                         'generation_rate': avg_generated_boxes / max(avg_gt_boxes, 1)
                     },
                     'detailed_results': test_results
@@ -1952,6 +2049,7 @@ class AdvancedTrainer:
             print(f"   总体平均误差: {avg_overall_error:.4f}")
             print(f"   X误差: {avg_x_error:.4f} | Y误差: {avg_y_error:.4f} | Z误差: {avg_z_error:.4f}")
             print(f"   W误差: {avg_w_error:.4f} | H误差: {avg_h_error:.4f} | L误差: {avg_l_error:.4f}")
+            print(f"   Roll误差: {avg_roll_error:.4f} | Pitch误差: {avg_pitch_error:.4f} | Yaw误差: {avg_yaw_error:.4f}")
         
         return {
             'generation_iou': avg_gen_iou,
@@ -1963,7 +2061,10 @@ class AdvancedTrainer:
             'avg_z_error': avg_z_error,
             'avg_w_error': avg_w_error,
             'avg_h_error': avg_h_error,
-            'avg_l_error': avg_l_error
+            'avg_l_error': avg_l_error,
+            'avg_roll_error': avg_roll_error,
+            'avg_pitch_error': avg_pitch_error,
+            'avg_yaw_error': avg_yaw_error
         }
     
     def _save_checkpoint(self, is_best: bool = False, is_best_generation: bool = False):
@@ -2104,6 +2205,9 @@ class AdvancedTrainer:
                         'test_best_val/w_error': test_results.get('avg_w_error', 0.0),
                         'test_best_val/h_error': test_results.get('avg_h_error', 0.0),
                         'test_best_val/l_error': test_results.get('avg_l_error', 0.0),
+                        'test_best_val/roll_error': test_results.get('avg_roll_error', 0.0),
+                        'test_best_val/pitch_error': test_results.get('avg_pitch_error', 0.0),
+                        'test_best_val/yaw_error': test_results.get('avg_yaw_error', 0.0),
                         'test_best_val/avg_generated_boxes': test_results.get('avg_generated_boxes', 0.0),
                         'test_best_val/avg_gt_boxes': test_results.get('avg_gt_boxes', 0.0),
                         'test_best_val/generation_rate': test_results.get('avg_generated_boxes', 0.0) / max(test_results.get('avg_gt_boxes', 1), 1),
@@ -2121,6 +2225,9 @@ class AdvancedTrainer:
                         'test_best_gen/w_error': test_results.get('avg_w_error', 0.0),
                         'test_best_gen/h_error': test_results.get('avg_h_error', 0.0),
                         'test_best_gen/l_error': test_results.get('avg_l_error', 0.0),
+                        'test_best_gen/roll_error': test_results.get('avg_roll_error', 0.0),
+                        'test_best_gen/pitch_error': test_results.get('avg_pitch_error', 0.0),
+                        'test_best_gen/yaw_error': test_results.get('avg_yaw_error', 0.0),
                         'test_best_gen/avg_generated_boxes': test_results.get('avg_generated_boxes', 0.0),
                         'test_best_gen/avg_gt_boxes': test_results.get('avg_gt_boxes', 0.0),
                         'test_best_gen/generation_rate': test_results.get('avg_generated_boxes', 0.0) / max(test_results.get('avg_gt_boxes', 1), 1),
@@ -2133,6 +2240,7 @@ class AdvancedTrainer:
             print(f"   总体平均误差: {test_results.get('avg_overall_error', 0.0):.4f}")
             print(f"   X误差: {test_results.get('avg_x_error', 0.0):.4f} | Y误差: {test_results.get('avg_y_error', 0.0):.4f} | Z误差: {test_results.get('avg_z_error', 0.0):.4f}")
             print(f"   W误差: {test_results.get('avg_w_error', 0.0):.4f} | H误差: {test_results.get('avg_h_error', 0.0):.4f} | L误差: {test_results.get('avg_l_error', 0.0):.4f}")
+            print(f"   Roll误差: {test_results.get('avg_roll_error', 0.0):.4f} | Pitch误差: {test_results.get('avg_pitch_error', 0.0):.4f} | Yaw误差: {test_results.get('avg_yaw_error', 0.0):.4f}")
             print(f"   平均生成数量: {test_results.get('avg_generated_boxes', 0.0):.1f} | 平均GT数量: {test_results.get('avg_gt_boxes', 0.0):.1f}")
             print(f"   生成率: {test_results.get('avg_generated_boxes', 0.0) / max(test_results.get('avg_gt_boxes', 1), 1):.2f}")
             
@@ -2249,6 +2357,9 @@ class AdvancedTrainer:
                         'val/w_error': val_results.get('avg_w_error', 0.0),
                         'val/h_error': val_results.get('avg_h_error', 0.0),
                         'val/l_error': val_results.get('avg_l_error', 0.0),
+                        'val/roll_error': val_results.get('avg_roll_error', 0.0),
+                        'val/pitch_error': val_results.get('avg_pitch_error', 0.0),
+                        'val/yaw_error': val_results.get('avg_yaw_error', 0.0),
                         
                         # 训练参数
                         'train/teacher_forcing_ratio': train_stats.teacher_forcing_ratio,
@@ -2280,6 +2391,7 @@ class AdvancedTrainer:
                     print(f"   总体平均误差: {val_results.get('avg_overall_error', 0.0):.4f}")
                     print(f"   X误差: {val_results.get('avg_x_error', 0.0):.4f} | Y误差: {val_results.get('avg_y_error', 0.0):.4f} | Z误差: {val_results.get('avg_z_error', 0.0):.4f}")
                     print(f"   W误差: {val_results.get('avg_w_error', 0.0):.4f} | H误差: {val_results.get('avg_h_error', 0.0):.4f} | L误差: {val_results.get('avg_l_error', 0.0):.4f}")
+                    print(f"   Roll误差: {val_results.get('avg_roll_error', 0.0):.4f} | Pitch误差: {val_results.get('avg_pitch_error', 0.0):.4f} | Yaw误差: {val_results.get('avg_yaw_error', 0.0):.4f}")
                     print(f"📦 箱子统计:")
                     print(f"   平均生成数量: {val_results['avg_generated_boxes']:.1f} | 平均GT数量: {val_results['avg_gt_boxes']:.1f} | 生成率: {val_results['avg_generated_boxes']/max(val_results['avg_gt_boxes'], 1):.2f}")
                     print(f"⚖️  权重详情:")
@@ -2323,6 +2435,9 @@ class AdvancedTrainer:
                 'test/w_error': test_results.get('avg_w_error', 0.0),
                 'test/h_error': test_results.get('avg_h_error', 0.0),
                 'test/l_error': test_results.get('avg_l_error', 0.0),
+                'test/roll_error': test_results.get('avg_roll_error', 0.0),
+                'test/pitch_error': test_results.get('avg_pitch_error', 0.0),
+                'test/yaw_error': test_results.get('avg_yaw_error', 0.0),
                 'test/avg_generated_boxes': test_results.get('avg_generated_boxes', 0.0),
                 'test/avg_gt_boxes': test_results.get('avg_gt_boxes', 0.0),
                 'test/generation_rate': test_results.get('avg_generated_boxes', 0.0) / max(test_results.get('avg_gt_boxes', 1), 1)

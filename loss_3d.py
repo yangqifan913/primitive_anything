@@ -23,14 +23,20 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
         num_discrete_w: int = 64,
         num_discrete_h: int = 64,
         num_discrete_l: int = 64,
+        num_discrete_roll: int = 64,    # 新增
+        num_discrete_pitch: int = 64,   # 新增
+        num_discrete_yaw: int = 64,     # 新增
         
         # 连续范围参数
-                    continuous_range_x: Tuple[float, float] = (0.5, 2.5),
+        continuous_range_x: Tuple[float, float] = (0.5, 2.5),
         continuous_range_y: Tuple[float, float] = (-2, 2),
         continuous_range_z: Tuple[float, float] = (-1.5, 1.5),
         continuous_range_w: Tuple[float, float] = (0.3, 0.7),
         continuous_range_h: Tuple[float, float] = (0.3, 0.7),
         continuous_range_l: Tuple[float, float] = (0.3, 0.7),
+        continuous_range_roll: Tuple[float, float] = (-1.5708, 1.5708),    # 新增
+        continuous_range_pitch: Tuple[float, float] = (-1.5708, 1.5708),   # 新增
+        continuous_range_yaw: Tuple[float, float] = (-1.5708, 1.5708),     # 新增
         
         # 基础损失权重
         base_classification_weight: float = 1.0,
@@ -877,7 +883,7 @@ class AdaptivePrimitiveTransformer3DLoss(nn.Module):
         # 获取目标序列长度
         target_seq_len = targets_dict['x'].shape[1]  # max_boxes = 15
         
-        for attr in ['x', 'y', 'z', 'w', 'h', 'l']:
+        for attr in ['x', 'y', 'z', 'w', 'h', 'l', 'roll', 'pitch', 'yaw']:
             logits = logits_dict[f'{attr}_logits']  # [B, seq_len, num_bins]
             pred_seq_len = logits.shape[1]
             
